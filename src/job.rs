@@ -30,6 +30,7 @@ pub fn run_job(job: &Job, batch: &str, finder: &dyn RelationFinder, max_columns:
         verify: None,
         tag: None,
         note: None,
+        escalated_from: None,
     };
     if names.len() > max_columns {
         rec.note = Some(format!(

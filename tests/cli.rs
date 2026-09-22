@@ -63,3 +63,38 @@ fn bad_batch_fails_cleanly() {
     assert!(!run.status.success());
     assert!(String::from_utf8_lossy(&run.stderr).starts_with("error:"));
 }
+
+#[test]
+fn rerun_resumes_instead_of_repeating() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("r.jsonl");
+    let batch = dir.path().join("b.toml");
+    let text = BATCH.replace("OUT", out.to_str().unwrap()).replace(
+        "coeff_bound = 1000",
+        "coeff_bound = 1000\nfinder = \"multilevel\"",
+    );
+    std::fs::write(&batch, text).unwrap();
+    let bin = env!("CARGO_BIN_EXE_pihunt");
+    let run = || {
+        Command::new(bin)
+            .args(["run", batch.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+
+    assert!(run().status.success());
+    let first = std::fs::read_to_string(&out).unwrap();
+    let again = run();
+    assert!(again.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        first,
+        "resume must not append"
+    );
+    let stdout = String::from_utf8_lossy(&again.stdout);
+    assert!(
+        stdout.contains("resumed 2 attempts from the log"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("hit [known] b=16 m=8"), "{stdout}");
+}

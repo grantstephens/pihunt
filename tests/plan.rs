@@ -100,3 +100,12 @@ fn job_ids_are_stable_and_precise() {
         assert_ne!(a.id("classic"), v.id("classic"), "{v:?}");
     }
 }
+
+#[test]
+fn escalated_jobs_double_digits() {
+    let a = job(vec![Extra::Log2]);
+    assert_eq!(a.escalated(0), a);
+    assert_eq!(a.escalated(1).digits, 240);
+    assert_eq!(a.escalated(2).digits, 480);
+    assert_ne!(a.escalated(1).id("classic"), a.id("classic"));
+}

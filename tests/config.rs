@@ -65,3 +65,23 @@ fn rejects_bad_configs() {
         assert!(parse(c).is_err(), "case {i} should fail:\n{c}");
     }
 }
+
+#[test]
+fn finder_and_escalate() {
+    use pihunt::config::FinderName;
+    let b = parse(GOOD).unwrap();
+    assert_eq!(b.defaults.finder, FinderName::Classic);
+    assert_eq!(b.defaults.escalate, 2);
+    let b = parse(&GOOD.replace(
+        "coeff_bound = 1000",
+        "coeff_bound = 1000\nfinder = \"multilevel\"\nescalate = 0",
+    ))
+    .unwrap();
+    assert_eq!(b.defaults.finder, FinderName::Multilevel);
+    assert_eq!(b.defaults.finder.finder().name(), "multilevel");
+    assert_eq!(b.defaults.escalate, 0);
+    for bad in ["finder = \"fast\"", "escalate = 5"] {
+        let text = GOOD.replace("coeff_bound = 1000", &format!("coeff_bound = 1000\n{bad}"));
+        assert!(parse(&text).is_err(), "{bad} should be rejected");
+    }
+}

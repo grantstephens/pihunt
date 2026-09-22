@@ -28,6 +28,7 @@ fn record(id: &str) -> Record {
         verify: None,
         tag: None,
         note: None,
+        escalated_from: None,
     }
 }
 
@@ -51,4 +52,14 @@ fn writes_appends_and_reads_back() {
     assert_eq!(back[0], record("a"));
     let line = std::fs::read_to_string(&path).unwrap();
     assert!(line.contains("\"outcome\":\"excluded\""));
+}
+
+#[test]
+fn reads_stage1_records_without_escalated_from() {
+    let mut v = serde_json::to_value(record("old")).unwrap();
+    v.as_object_mut().unwrap().remove("escalated_from");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.jsonl");
+    std::fs::write(&path, format!("{v}\n")).unwrap();
+    assert_eq!(read(&path).unwrap(), vec![record("old")]);
 }

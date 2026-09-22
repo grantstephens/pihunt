@@ -27,6 +27,14 @@ impl Job {
         }
     }
 
+    /// The same job at 2^k times the digits, for escalation.
+    pub fn escalated(&self, k: u32) -> Job {
+        Job {
+            digits: self.digits << k,
+            ..self.clone()
+        }
+    }
+
     /// Stable 32-hex-char ID over everything that determines the outcome.
     pub fn id(&self, finder: &str) -> String {
         let s = &self.shape;

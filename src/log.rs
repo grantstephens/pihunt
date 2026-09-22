@@ -67,6 +67,9 @@ pub struct Record {
     pub tag: Option<String>,
     /// Why a job was inconclusive or skipped.
     pub note: Option<String>,
+    /// Job ID of the inconclusive attempt this one retries at higher precision.
+    #[serde(default)]
+    pub escalated_from: Option<String>,
 }
 
 /// Spawn the single writer thread. Drop the sender to finish; join to surface IO errors.

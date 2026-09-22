@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use pihunt::basis::{Columns, Extra, Shape};
 use pihunt::log::{Kind, Record};
-use pihunt::pslq::classic::ClassicPslq;
-use pihunt::{config, job, log, plan, verify};
+use pihunt::runner::{Ctx, load_done, run_chain};
+use pihunt::{config, log, plan, verify};
 use rayon::prelude::*;
 use rug::Integer;
 use std::path::PathBuf;
@@ -48,27 +48,50 @@ fn run(path: PathBuf) -> Result<ExitCode, String> {
         .num_threads(threads)
         .build()
         .map_err(|e| e.to_string())?;
+    let done = load_done(&batch.output)?;
     let (tx, writer) = log::spawn_writer(&batch.output).map_err(|e| e.to_string())?;
-    let done = AtomicUsize::new(0);
+    let ctx = Ctx {
+        batch: &batch.name,
+        finder: batch.defaults.finder.finder(),
+        max_columns: batch.defaults.max_columns,
+        escalate: batch.defaults.escalate,
+    };
+    let (finished, ran, resumed) = (
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    );
     let total = jobs.len();
     eprintln!(
-        "{}: {total} jobs on {threads} threads → {}",
+        "{}: {total} jobs, {} finder, on {threads} threads → {} ({} attempts already logged)",
         batch.name,
-        batch.output.display()
+        ctx.finder.name(),
+        batch.output.display(),
+        done.len()
     );
 
     let records: Vec<Record> = pool.install(|| {
         jobs.par_iter()
             .map_with(tx, |tx, j| {
-                let rec = job::run_job(j, &batch.name, &ClassicPslq, batch.defaults.max_columns);
-                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                let chain = run_chain(j, &ctx, &done, &mut |rec| {
+                    ran.fetch_add(1, Ordering::Relaxed);
+                    tx.send(rec.clone()).expect("writer thread alive");
+                });
+                resumed.fetch_add(chain.resumed, Ordering::Relaxed);
+                let rec = chain.last;
+                let n = finished.fetch_add(1, Ordering::Relaxed) + 1;
+                let esc = if rec.escalated_from.is_some() {
+                    ", escalated"
+                } else {
+                    ""
+                };
                 eprintln!(
-                    "[{n}/{total}] {} → {:?} ({} ms)",
+                    "[{n}/{total}] {} → {:?} ({} ms, {} digits{esc})",
                     describe(&rec),
                     rec.outcome,
-                    rec.elapsed_ms
+                    rec.elapsed_ms,
+                    rec.params.precision_digits
                 );
-                tx.send(rec.clone()).expect("writer thread alive");
                 rec
             })
             .collect()
@@ -77,6 +100,11 @@ fn run(path: PathBuf) -> Result<ExitCode, String> {
         .join()
         .expect("writer thread panicked")
         .map_err(|e| e.to_string())?;
+    println!(
+        "ran {} attempts, resumed {} attempts from the log",
+        ran.into_inner(),
+        resumed.into_inner()
+    );
     summarise(&records);
     Ok(ExitCode::SUCCESS)
 }
@@ -87,11 +115,13 @@ fn show_plan(path: PathBuf) -> Result<ExitCode, String> {
     let max_cols = batch.defaults.max_columns;
     let (skipped, run): (Vec<_>, Vec<_>) = jobs.iter().partition(|j| j.shape.columns() > max_cols);
     println!(
-        "{}: {} jobs ({} to run, {} skipped over max_columns {max_cols})",
+        "{}: {} jobs ({} to run, {} skipped over max_columns {max_cols}), {} finder, escalate up to {}x digits",
         batch.name,
         jobs.len(),
         run.len(),
-        skipped.len()
+        skipped.len(),
+        batch.defaults.finder.finder().name(),
+        1u32 << batch.defaults.escalate
     );
     if let (Some(n), Some(lo), Some(hi)) = (
         run.iter().map(|j| j.shape.columns()).max(),

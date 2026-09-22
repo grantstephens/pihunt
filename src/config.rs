@@ -1,6 +1,7 @@
 //! Batch file parsing and validation.
 
 use crate::basis::Extra;
+use crate::pslq::{RelationFinder, classic::ClassicPslq, multilevel::MultilevelPslq};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,28 @@ pub struct Defaults {
     pub max_iterations: u64,
     #[serde(default = "default_max_columns")]
     pub max_columns: usize,
+    #[serde(default)]
+    pub finder: FinderName,
+    /// Inconclusive jobs are retried at 2x, 4x, ... digits up to this many times.
+    #[serde(default = "default_escalate")]
+    pub escalate: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FinderName {
+    #[default]
+    Classic,
+    Multilevel,
+}
+
+impl FinderName {
+    pub fn finder(self) -> &'static dyn RelationFinder {
+        match self {
+            FinderName::Classic => &ClassicPslq,
+            FinderName::Multilevel => &MultilevelPslq,
+        }
+    }
 }
 
 fn default_gamma() -> f64 {
@@ -38,6 +61,9 @@ fn default_max_iterations() -> u64 {
 }
 fn default_max_columns() -> usize {
     80
+}
+fn default_escalate() -> u32 {
+    2
 }
 
 /// `"auto"` or a fixed number of decimal digits.
@@ -123,6 +149,12 @@ fn validate(b: &Batch) -> Result<(), String> {
         return Err(format!(
             "gamma must be > sqrt(4/3) ≈ 1.1547, got {}",
             d.gamma
+        ));
+    }
+    if d.escalate > 4 {
+        return Err(format!(
+            "escalate must be <= 4 (16x digits), got {}",
+            d.escalate
         ));
     }
     if d.coeff_bound < 2 {
