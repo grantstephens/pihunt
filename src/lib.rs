@@ -1,4 +1,5 @@
 pub mod basis;
+pub mod classify;
 pub mod config;
 pub mod known;
 pub mod log;
