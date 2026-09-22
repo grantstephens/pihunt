@@ -1,0 +1,18 @@
+name   = "base10-scout"
+output = "results/base10-scout.jsonl"
+
+[defaults]
+coeff_bound = 1000
+max_columns = 50
+
+[search]
+mode    = "sample"
+bases   = [10, 100, 1000]
+periods = { from = 2, to = 16 }
+degrees = [[1, 1], [1, 2], [2, 2]]
+extras  = [[], ["log2", "log5"], ["pi2", "log2", "log3", "log5", "catalan", "zeta3"]]
+
+[sample]
+method = "sobol"
+count  = 200
+seed   = 42
