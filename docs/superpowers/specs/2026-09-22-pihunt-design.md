@@ -39,7 +39,9 @@ src/
 │   ├── mod.rs      # trait RelationFinder
 │   └── classic.rs  # textbook PSLQ, full MPFR precision
 ├── classify.rs     # Outcome → Hit | Junk | Suspicious | Spurious | Excluded | Inconclusive
-├── verify.rs       # recompute a relation at 2× precision
+├── verify.rs       # residual check against 2× precision columns
+├── known.rs        # literature formulas, for known/NEW tagging
+├── job.rs          # one job end to end → Record
 └── log.rs          # append-only JSONL writer
 ```
 
@@ -69,7 +71,8 @@ Column count `n = 1 + m·(s_hi − s_lo + 1) + |extras|`.
 ### Precision
 
 - Config gives coefficient bound `C`.
-- Auto precision (decimal digits): `ceil(n · log10(C) · 1.25) + 20`. Overridable with an integer.
+- Auto precision (decimal digits): `ceil(n · log10(C) · 1.5) + 50`. Overridable with an integer ≥ 60. (Prototyping showed factor 1.25 lets spurious ~10⁷-coefficient relations through at n ≈ 45; 1.5 excludes cleanly.)
+- Every job builds its columns once at P digits (for PSLQ) and once at 2P digits (for verification).
 - Series evaluated with guard bits `ceil(log2(terms)) + 32` above working precision, then rounded.
 - Terms per series ≈ `precision_bits / log2(b)` plus margin for the `(mk+j)^s` factor.
 
@@ -78,7 +81,7 @@ Column count `n = 1 + m·(s_hi − s_lo + 1) + |extras|`.
 Removes rational linear dependencies among non-π columns so every relation found in the main search must involve π.
 
 1. Run PSLQ on all columns except π.
-2. If a relation is found under the bound: record it as a `basis_relation` (column dropped + coefficients), drop the highest-index column with nonzero coefficient. Basis relations are checked against the known-formula table and tagged `known` / `NEW` like Hits — a new formula for π², log 5, Catalan etc. is still worth knowing about.
+2. If a relation is found, it must have max |coeff| ≤ C **and** verify at 2P precision; otherwise the job ends `Inconclusive` (never drop a column on an unverified relation — prototyping showed unchecked reduction at n ≈ 60 dropping genuine columns on 10⁶–10⁸-coefficient garbage). A trusted relation is recorded as a basis relation (column dropped + coefficients) and the highest-index column with nonzero coefficient is dropped. Basis relations are tagged `known` if they match the known-formula table, otherwise untagged (base-10 log identities are common and uninteresting, so they don't scream NEW).
 3. Repeat until PSLQ reports no relation (Excluded).
 4. Prepend π and run the main search on the reduced basis.
 
@@ -144,7 +147,7 @@ seed   = 42
 ```
 
 - **grid:** cartesian product of `bases × periods × degrees × extras`.
-- **sample:** one unit-cube dimension per axis (base, period, degree range, extras set); each coordinate floored onto the discrete choices; duplicates dropped; seeded and reproducible. Sample mode is for scouting only — it makes no coverage claim.
+- **sample:** one unit-cube dimension per axis (base, period, degree range, extras set); each coordinate floored onto the discrete choices; duplicates dropped; seeded and reproducible. Sample mode is for scouting only — it makes no coverage claim. `count` ≤ 65536 and `seed` is a u32 (Sobol generator limits).
 
 Config validation errors (bad γ, unknown extra, empty axis, `from > to`) fail before any job runs.
 
@@ -172,6 +175,7 @@ Append-only JSONL, one line per finished job, written by a single writer thread 
 ```
 
 - `outcome` ∈ `hit | junk | suspicious | spurious | excluded | inconclusive | skipped`.
+- `params` also records `max_iterations`; `verify` is `{"passed": bool, "residual_log10": f64}`; a `note` field says why a job was inconclusive, skipped or junk.
 - Integer coefficients and bounds serialised as **strings** (arbitrary size, no silent truncation).
 - End of batch: terminal summary with counts per outcome and every `Hit` listed; `NEW` hits highlighted.
 
