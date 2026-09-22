@@ -98,3 +98,35 @@ fn rerun_resumes_instead_of_repeating() {
     );
     assert!(stdout.contains("hit [known] b=16 m=8"), "{stdout}");
 }
+
+#[test]
+fn report_reads_logs() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("r.jsonl");
+    let batch = dir.path().join("b.toml");
+    std::fs::write(&batch, BATCH.replace("OUT", out.to_str().unwrap())).unwrap();
+    let bin = env!("CARGO_BIN_EXE_pihunt");
+    assert!(
+        Command::new(bin)
+            .args(["run", batch.to_str().unwrap()])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    let report = Command::new(bin)
+        .args(["report", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(report.status.success());
+    let md = String::from_utf8_lossy(&report.stdout);
+    assert!(md.starts_with("# pihunt exclusion report"), "{md}");
+    assert!(md.contains("| 16 | 7 | 1..1 | - | 1000 |"), "{md}");
+
+    let missing = Command::new(bin)
+        .args(["report", "nope.jsonl"])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+}

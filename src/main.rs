@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand};
 use pihunt::basis::{Columns, Extra, Shape};
 use pihunt::log::{Kind, Record};
+use pihunt::report::{describe, formula};
 use pihunt::runner::{Ctx, load_done, run_chain};
-use pihunt::{config, log, plan, verify};
+use pihunt::{config, log, plan, report, verify};
 use rayon::prelude::*;
 use rug::Integer;
 use std::path::PathBuf;
@@ -24,6 +25,11 @@ enum Cmd {
     Plan { batch: PathBuf },
     /// Re-verify every hit in a results log at 2x precision.
     Verify { results: PathBuf },
+    /// Markdown exclusion report over one or more results logs, to stdout.
+    Report {
+        #[arg(required = true)]
+        results: Vec<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -31,6 +37,7 @@ fn main() -> ExitCode {
         Cmd::Run { batch } => run(batch),
         Cmd::Plan { batch } => show_plan(batch),
         Cmd::Verify { results } => reverify(results),
+        Cmd::Report { results } => write_report(results),
     };
     result.unwrap_or_else(|e| {
         eprintln!("error: {e}");
@@ -133,6 +140,15 @@ fn show_plan(path: PathBuf) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn write_report(paths: Vec<PathBuf>) -> Result<ExitCode, String> {
+    let mut records = Vec::new();
+    for path in &paths {
+        records.extend(log::read(path)?);
+    }
+    print!("{}", report::render(&records));
+    Ok(ExitCode::SUCCESS)
+}
+
 fn reverify(path: PathBuf) -> Result<ExitCode, String> {
     let records = log::read(&path)?;
     let mut failed = 0;
@@ -167,33 +183,6 @@ fn reverify(path: PathBuf) -> Result<ExitCode, String> {
     })
 }
 
-fn describe(rec: &Record) -> String {
-    let p = &rec.params;
-    let x = if p.extras.is_empty() {
-        "-".to_string()
-    } else {
-        p.extras.join(",")
-    };
-    format!(
-        "b={} m={} s={}..{} x={x}",
-        p.base, p.period, p.degrees[0], p.degrees[1]
-    )
-}
-
-fn formula(rec: &Record) -> String {
-    let Some(rel) = &rec.relation else {
-        return String::new();
-    };
-    rec.columns
-        .iter()
-        .zip(rel)
-        .filter(|(_, c)| c.as_str() != "0")
-        .map(|(n, c)| format!("{c}·{n}"))
-        .collect::<Vec<_>>()
-        .join(" + ")
-        + " = 0"
-}
-
 fn summarise(records: &[Record]) {
     use Kind::*;
     println!("\n== summary ==");
@@ -218,6 +207,10 @@ fn summarise(records: &[Record]) {
         } else {
             ""
         };
-        println!("{banner}hit [{tag}] {}: {}", describe(rec), formula(rec));
+        println!(
+            "{banner}hit [{tag}] {}: {}",
+            describe(rec),
+            formula(&rec.columns, rec.relation.as_deref().unwrap_or_default())
+        );
     }
 }

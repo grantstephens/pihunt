@@ -7,5 +7,6 @@ pub mod log;
 pub mod plan;
 pub mod pslq;
 pub mod reduce;
+pub mod report;
 pub mod runner;
 pub mod verify;
