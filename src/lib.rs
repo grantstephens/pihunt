@@ -1,6 +1,7 @@
 pub mod basis;
 pub mod classify;
 pub mod config;
+pub mod job;
 pub mod known;
 pub mod log;
 pub mod plan;
