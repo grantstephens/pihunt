@@ -1,0 +1,6 @@
+[tools]
+rust = "stable"
+
+[env]
+# ~/sync is synced; keep build artifacts out of it
+CARGO_TARGET_DIR = "{{env.HOME}}/.cache/pihunt/target"
