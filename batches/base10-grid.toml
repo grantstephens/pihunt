@@ -1,0 +1,16 @@
+# First exhaustive stage-2 sweep: bases 10^k, periods 2..20, C = 10^4.
+name   = "base10-grid"
+output = "results/base10-grid.jsonl"
+
+[defaults]
+coeff_bound = 10000
+finder      = "multilevel"
+escalate    = 2
+max_columns = 70
+
+[search]
+mode    = "grid"
+bases   = [10, 100, 1000]
+periods = { from = 2, to = 20 }
+degrees = [[1, 1], [1, 2], [2, 2]]
+extras  = [[], ["log2", "log3", "log5"], ["pi2", "log2", "log3", "log5", "catalan", "zeta3"]]

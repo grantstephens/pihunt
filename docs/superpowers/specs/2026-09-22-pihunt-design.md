@@ -224,3 +224,14 @@ Unit / integration tests, easiest first:
 - System GMP/MPFR (present) used by `rug`.
 - Crates: `rug`, `rayon`, `serde`, `serde_json`, `toml`, `clap`, `blake3`, `sobol_burley`, `jiff`. LHS is hand-rolled.
 - `results/` is committed (scientific record); `batches/` holds batch configs.
+
+## Stage 2 — as built (2026-09-22)
+
+Built directly from the roadmap above (no separate spec/plan, at the user's request).
+
+- **Multilevel PSLQ** (`src/pslq/multilevel.rs`): two-level, Bailey's pslqm2. f64 inner iterations accumulate an exact integer transform (entries < 2^52; an iteration that would overflow is rolled back from a snapshot). At each sync the transform is applied to the full-precision state, H is re-triangularised with Givens LQ, then fully Hermite-reduced. Classic's internals became the shared `pslq::State`, which alone performs termination checks — the f64 loop never makes claims. The inner loop also stops once its bound estimate reaches the exclusion threshold; without that it ran past exclusions into precision-floor relations (caught by the 1000-seed random test).
+- **Validation:** the whole PSLQ test suite runs against both finders, and `tests/equivalence.rs` requires identical verdicts (outcome, relation, tag, dropped columns) on every job of the known and scout batches (200 jobs). ~7× faster than classic; see `docs/timing-baseline.md`.
+- **Config:** `defaults.finder = "classic" | "multilevel"` (default classic), `defaults.escalate` (default 2, max 4).
+- **Resume + escalation** (`src/runner.rs`): each job runs as a chain of attempts at 1×, 2×, 4×… digits while inconclusive. Attempts whose job ID is already in the output log are reused, so re-running a batch resumes it. Records gain `escalated_from` (serde default, so stage-1 logs still load).
+- **Report:** `pihunt report <logs...>` prints markdown: strongest exclusion per shape, hits (NEW ones in their own section), deduplicated basis relations, unresolved shapes.
+- **Deferred:** digit extractor (no NEW hit exists); Householder LQ / three-level PSLQ (next speedup).
