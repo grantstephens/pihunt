@@ -1,0 +1,8 @@
+n=  10000 m_bits=   1328 M=   30 N=  4526 err=1.3e-14 tB=   0.04 tC=    0.24 art=   0.07 luc= 0.04 swp= 0.10 chunks=   40 leaf=      46137 sweep=  170679 peak~14223
+n=  20000 m_bits=   1879 M=   42 N=  8486 err=1.7e-14 tB=   0.11 tC=    0.54 art=   0.14 luc= 0.09 swp= 0.25 chunks=   55 leaf=     116664 sweep=  455500 peak~21924
+n=  40000 m_bits=   2657 M=   60 N= 15920 err=4.4e-14 tB=   0.37 tC=    0.54 art=   0.16 luc= 0.08 swp= 0.20 chunks=   75 leaf=     288719 sweep=  699337 peak~31368
+n=  80000 m_bits=   3758 M=   86 N= 29970 err=2.1e-14 tB=   0.44 tC=    1.22 art=   0.48 luc= 0.24 swp= 0.37 chunks=  104 leaf=     740908 sweep= 1059659 peak~47112
+n= 160000 m_bits=   5315 M=  120 N= 56854 err=8.3e-14 tB=   1.45 tC=    2.85 art=   1.01 luc= 0.42 swp= 1.07 chunks=  145 leaf=    1943237 sweep= 3408342 peak~67704
+n= 320000 m_bits=   7516 M=  170 N=107904 err=6.4e-14 tB=   4.08 tC=    5.87 art=   2.43 luc= 1.00 swp= 1.59 chunks=  202 leaf=    5077603 sweep= 3983300 peak~95511
+n= 640000 m_bits=  10630 M=  240 N=205428 err=1.8e-13 tB=  10.15 tC=   13.46 art=   6.92 luc= 1.72 swp= 3.32 chunks=  281 leaf=   13406084 sweep= 9152265 peak~145782
+n=1280000 m_bits=  15033 M=  340 N=391826 err=7.8e-13 tB=  23.33 tC=   32.36 art=  20.72 luc= 3.22 swp= 4.62 chunks=  390 leaf=   35226397 sweep=17376692 peak~207340
