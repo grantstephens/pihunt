@@ -10,6 +10,7 @@ pub mod bignum;
 pub mod mem_profile;
 pub mod nthdigit;
 pub mod nthdigit2;
+pub mod pi_ref;
 
 /// Decimal digits → bits, rounded up.
 pub fn digits_to_bits(digits: u32) -> u32 {

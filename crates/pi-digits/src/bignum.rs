@@ -41,6 +41,9 @@ mod imp {
             debug_assert!(Integer::from(&self.0 % d) == 0, "div_u64_exact: not exact");
             Big(Integer::from(&self.0 / d))
         }
+        pub fn div_u64(&self, d: u64) -> Big {
+            Big(Integer::from(&self.0 / d))
+        }
         pub fn to_u64(&self) -> Option<u64> {
             self.0.to_u64()
         }

@@ -43,6 +43,7 @@ fn ring_identities_hold_on_large_values() {
 fn exact_division_and_small_helpers() {
     let x = Big::from_u64(12345).mul(&Big::pow_u64(10, 30));
     assert_eq!(x.div_u64_exact(12345), Big::pow_u64(10, 30));
+    assert_eq!(Big::from_u64(17).div_u64(5), Big::from_u64(3)); // truncates, doesn't round
     assert_eq!(Big::pow_u64(10, 3).to_u64(), Some(1000));
     assert_eq!(Big::binomial(10, 3).to_u64(), Some(120));
     assert_eq!(
@@ -70,5 +71,6 @@ fn matches_rug_on_random_inputs() {
         assert_eq!(to_rug(&a.rem(&b)), Integer::from(&ra % &rb));
         let m = lcg(&mut s) | 1;
         assert_eq!(a.rem_u64(m), Integer::from(&ra % m).to_u64().unwrap());
+        assert_eq!(to_rug(&a.div_u64(m)), Integer::from(&ra / m));
     }
 }

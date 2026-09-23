@@ -835,8 +835,8 @@ pub fn digits(n: u64, count: usize) -> String {
         let n0 = count as u64 + guard;
         if n < SMALL_N_THRESHOLD || n < 4 * n0 || n0 > MAX_N0 as u64 {
             // Past MAX_N0 the u128 accumulator can't certify the digits (a pathological run of
-            // ~20 equal digits right after the block). MPFR is exact but needs O(n) memory.
-            return digits_via_mpfr(n, count);
+            // ~20 equal digits right after the block).
+            return digits_fallback(n, count);
         }
         let n0 = n0 as u32;
         let x = frac_10n_pi(n, n0);
@@ -852,9 +852,34 @@ pub fn digits(n: u64, count: usize) -> String {
     }
 }
 
-/// Computes `count` digits of π at position `n+1..=n+count` directly with MPFR (cheap for
-/// small `n`, used as the fallback in [`digits`]).
-pub(crate) fn digits_via_mpfr(n: u64, count: usize) -> String {
+/// Computes `count` digits of π at position `n+1..=n+count`, used by both [`digits`] and
+/// [`crate::nthdigit2::digits`] whenever the fixed-point certification loop can't be trusted
+/// directly: either the position is too small for Gourdon's method (`n < SMALL_N_THRESHOLD` or
+/// `n < 4*n0`, "case (a)") or a rare run of ~20+ equal digits right after the requested block
+/// pushed the guard past [`MAX_N0`] ("case (b)", which can happen at any `n`, including
+/// n ~ 1e7 — see the module docs' "Digit-boundary safety" section).
+///
+/// Case (a) only ever happens for `n < SMALL_N_THRESHOLD`: `n < 4*n0` with `n0 <= MAX_N0`
+/// implies `n < 4*MAX_N0`, well under the threshold. So case (a) always uses the exact,
+/// fast-for-small-n [`crate::pi_ref::digits`] — the same code path in every backend.
+///
+/// Case (b) can happen at large `n`, where `pi_ref`'s Machin sum (quadratic-ish in the digit
+/// count) would be far too slow — hours where MPFR takes seconds. So under the `gmp` feature
+/// this rare case still uses MPFR (`rug::Float`), kept as small as possible since it exists
+/// purely for this one case; the `pure` backend (no MPFR available) pays the `pi_ref` cost
+/// there too.
+pub(crate) fn digits_fallback(n: u64, count: usize) -> String {
+    if n < SMALL_N_THRESHOLD {
+        return crate::pi_ref::digits(n, count);
+    }
+    digits_fallback_large_n(n, count)
+}
+
+/// Case (b) of [`digits_fallback`] (`n0 > MAX_N0` forced the call at `n >= SMALL_N_THRESHOLD`):
+/// MPFR computes π directly to `n + count + guard` digits, which stays fast even at large `n`
+/// (unlike `pi_ref`'s Machin sum).
+#[cfg(feature = "gmp")]
+fn digits_fallback_large_n(n: u64, count: usize) -> String {
     let guard: u64 = 20;
     let total = n + count as u64 + guard;
     let bits = crate::digits_to_bits(total as u32) + 8;
@@ -865,6 +890,13 @@ pub(crate) fn digits_via_mpfr(n: u64, count: usize) -> String {
     let s = int_part.to_string(); // "3" followed by `total` decimal digits
     let start = (n + 1) as usize;
     s[start..start + count].to_string()
+}
+
+/// Case (b) of [`digits_fallback`] on the `pure` backend: no MPFR to fall back on, so this
+/// rare case pays the `pi_ref` Machin-sum cost even at large `n`.
+#[cfg(not(feature = "gmp"))]
+fn digits_fallback_large_n(n: u64, count: usize) -> String {
+    crate::pi_ref::digits(n, count)
 }
 
 #[cfg(test)]

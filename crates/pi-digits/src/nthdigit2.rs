@@ -1409,8 +1409,8 @@ pub fn default_mem_bits(n: u64) -> u64 {
 
 /// `count` decimal digits of π at positions `n+1..=n+count`, computed with Theorem 2 at memory
 /// budget `mem_bits`. Mirrors [`crate::nthdigit::digits`] exactly (guard-doubling
-/// certification loop, MPFR fallback for small/ill-conditioned `n`, chunking beyond
-/// `MAX_N0`-certifiable length) — see that module's docs for the certification argument, which
+/// certification loop, [`nthdigit::digits_fallback`] for small/ill-conditioned `n`, chunking
+/// beyond `MAX_N0`-certifiable length) — see that module's docs for the certification argument, which
 /// applies unchanged since both algorithms use the same fixed-point encoding and the same
 /// "one ulp per rounded term" error accounting (just with a different, exactly-counted, term
 /// count here).
@@ -1428,7 +1428,7 @@ pub fn digits(n: u64, count: usize, mem_bits: u64) -> String {
     loop {
         let n0 = count as u64 + guard;
         if n < nthdigit::SMALL_N_THRESHOLD || n < 4 * n0 || n0 > MAX_N0 as u64 {
-            return nthdigit::digits_via_mpfr(n, count);
+            return nthdigit::digits_fallback(n, count);
         }
         let n0 = n0 as u32;
         let (x, terms) = frac_10n_pi_m_with_terms(n, n0, mem_bits);

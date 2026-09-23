@@ -185,9 +185,9 @@ fn check_fixed_point(x: u64, m: u64) {
 // ---------------------------------------------------------------------------------
 
 /// First `count` decimal digits of pi (`reference[i]` = digit at position `i+1`), computed
-/// once via MPFR directly (independent of `nthdigit`'s own MPFR fallback path in the sense
-/// that it doesn't share any code with `digits_via_mpfr`, only the underlying `Constant::Pi`
-/// value).
+/// once via MPFR directly (independent of `nthdigit`'s own fallback path in the sense that
+/// it doesn't share any code with `digits_fallback` / `pi_ref::digits`, only the underlying
+/// `Constant::Pi` value).
 fn reference_pi_digits(count: u64) -> String {
     let guard = 20u64;
     let total = count + guard;
