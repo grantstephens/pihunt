@@ -128,3 +128,14 @@ fn load_done_handles_missing_and_existing_logs() {
     let done = load_done(&path).unwrap();
     assert_eq!(done.get(&logged[0].job_id), Some(&logged[0]));
 }
+
+#[test]
+fn precision_limited_outcomes_escalate() {
+    use pihunt::runner::needs_more_precision;
+    for k in [Kind::Inconclusive, Kind::Suspicious, Kind::Spurious] {
+        assert!(needs_more_precision(k), "{k:?} should escalate");
+    }
+    for k in [Kind::Hit, Kind::Excluded, Kind::Skipped, Kind::Junk] {
+        assert!(!needs_more_precision(k), "{k:?} is settled");
+    }
+}

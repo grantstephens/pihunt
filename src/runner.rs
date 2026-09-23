@@ -24,7 +24,7 @@ pub struct Chain {
     pub resumed: usize,
 }
 
-/// Attempt `job` at its own digits, then escalate while inconclusive. Attempts already in
+/// Attempt `job` at its own digits, then escalate while `needs_more_precision`. Attempts already in
 /// `done` (keyed by job ID) are reused, not re-run. Every freshly run attempt goes to
 /// `on_record` as soon as it finishes, so a crash loses at most the attempt in flight.
 pub fn run_chain(
@@ -50,7 +50,7 @@ pub fn run_chain(
                 rec
             }
         };
-        let settled = rec.outcome != Kind::Inconclusive;
+        let settled = !needs_more_precision(rec.outcome);
         prev = Some(rec.job_id.clone());
         last = Some(rec);
         if settled {
@@ -61,6 +61,14 @@ pub fn run_chain(
         last: last.expect("at least one attempt"),
         resumed,
     }
+}
+
+/// Outcomes that mean "not enough precision to decide", so a retry at 2x digits can settle
+/// them: inconclusive runs, and relations that were only found at the precision floor
+/// (coefficients over the bound, or failing 2x verification). Junk is a bug signal, not a
+/// precision problem, so it is left for a human.
+pub fn needs_more_precision(kind: Kind) -> bool {
+    matches!(kind, Kind::Inconclusive | Kind::Suspicious | Kind::Spurious)
 }
 
 /// Every record already in `path`, keyed by job ID. A missing file means a fresh run.
