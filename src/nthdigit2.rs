@@ -281,18 +281,18 @@ fn classify_extras(
     k: u64,
     rem: u64,
     fac: &[(u64, u32)],
-    lucas_small: &mut Vec<(u64, u64, u64, u64)>, // (p, r, k, t)
-    padic_small: &mut Vec<(u64, u64, u64, u32)>, // (p, k, t, e)
-    cofactor: &mut Vec<(u64, u64, u64)>,         // (p, k, t)
+    lucas_small: &mut HashMap<(u64, u64), Vec<(u64, u64)>>,
+    padic_small: &mut HashMap<u64, Vec<(u64, u64, u32)>>,
+    cofactor: &mut Vec<(u64, u64, u64)>, // (p, k, t)
 ) {
     for &(p, e) in fac {
         if p > t {
             continue;
         }
         if e == 1 {
-            lucas_small.push((p, t % p, k, t));
+            lucas_small.entry((p, t % p)).or_default().push((k, t));
         } else {
-            padic_small.push((p, k, t, e));
+            padic_small.entry(p).or_default().push((k, t, e));
         }
     }
     if rem > 1 && rem <= t {
@@ -924,6 +924,89 @@ fn art_chunk(
     (acc, terms, lucas_out)
 }
 
+/// One Main-item chunk's worth of the ART, for the streaming path: regenerates the chunk's items
+/// from scratch (target window `[t0, t1)`, both `k = t` and `k = N-1-t`, doc §4.4's "generate
+/// each chunk's items on the fly by segment-factoring just those k-windows") instead of slicing
+/// a pre-built global item list, then defers to the unchanged [`art_chunk`]. Doubles the
+/// small-prime factoring work for this window (it was already done once by
+/// [`stream_needs_and_chunks`] to size the chunk) in exchange for never holding more than one
+/// chunk's items (`O(mem_bits / log n)`, doc §5.1) at a time. Every item here is `Tag::Main`
+/// (small-prime and cofactor Lucas/p-adic needs were already pulled out by
+/// [`classify_extras`]), so there's nothing for the caller to do with `art_chunk`'s `lucas_out`.
+fn art_chunk_by_range(
+    n: u64,
+    big_n: u64,
+    base: u64,
+    small_primes: &[u64],
+    t0: u64,
+    t1: u64,
+    lg_n: u32,
+) -> (u128, u64) {
+    let len = t1 - t0;
+    let (rem_lo, fac_lo) = factor_window(base, t0, len, small_primes);
+    let (rem_hi, fac_hi) = factor_window(base, big_n - t1, len, small_primes);
+    let mut items: Vec<Item> = Vec::new();
+    for t in t0..t1 {
+        let i_lo = (t - t0) as usize;
+        let i_hi = (t1 - 1 - t) as usize;
+        if let Some(q) = main_modulus(t, rem_lo[i_lo], &fac_lo[i_lo]) {
+            items.push(Item {
+                t,
+                q,
+                tag: Tag::Main(t),
+            });
+        }
+        if let Some(q) = main_modulus(t, rem_hi[i_hi], &fac_hi[i_hi]) {
+            items.push(Item {
+                t,
+                q,
+                tag: Tag::Main(big_n - 1 - t),
+            });
+        }
+    }
+    if items.is_empty() {
+        // Can happen for a target window where every k's prime factors are all <= t (nothing
+        // for Main to do) — art_chunk's product-tree `build` needs at least one item.
+        return (0, 0);
+    }
+    let (acc, terms, lucas_out) = art_chunk(n, big_n, base, &items, lg_n);
+    debug_assert!(
+        lucas_out.is_empty(),
+        "art_chunk_by_range's items are all Tag::Main"
+    );
+    (acc, terms)
+}
+
+/// Runs a batch of `Tag::Lucas` items (already built, sorted by target) through the same
+/// chunked ART as Main items (`O(mem_bits)` per chunk, doc §4.4), returning the resolved
+/// `(s_r, C(N,r))` values keyed by `(p, r)`. Shared by the small-prime pass and the cofactor
+/// pass in [`c_part`] — the ART's cost model doesn't care *why* an item's target is what it is,
+/// only that items arrive sorted (doc's "an ART item's target is a function of k" hint applies
+/// equally to a Lucas item's `t = r`).
+fn resolve_lucas_items(
+    n: u64,
+    big_n: u64,
+    base: u64,
+    items: &mut [Item],
+    mem_bits: u64,
+    lg_n: u32,
+) -> HashMap<(u64, u64), LucasVal> {
+    use rayon::prelude::*;
+    items.sort_by_key(|it| it.t);
+    let bounds = chunk_bounds(items, mem_bits);
+    bounds
+        .par_iter()
+        .map(|&(lo, hi)| art_chunk(n, big_n, base, &items[lo..hi], lg_n).2)
+        .fold(HashMap::new, |mut map, pairs| {
+            map.extend(pairs);
+            map
+        })
+        .reduce(HashMap::new, |mut m1, m2| {
+            m1.extend(m2);
+            m1
+        })
+}
+
 /// Resolves every `k` that needed a Lucas item (prime `p`, exponent 1) from the `(s_r, C(N,r))`
 /// values the ART produced, and folds each into the accumulator.
 fn lucas_consumers(
@@ -981,80 +1064,75 @@ fn padic_consumers(
         )
 }
 
-/// The full C part: builds ART/Lucas/p-adic items from `factor_interval`, runs the ART over
-/// `mem_bits`-sized chunks (in parallel across chunks via rayon), then the Lucas and p-adic
-/// consumer passes (in parallel across primes). Returns `(C, term_count)`, `term_count` being
-/// the exact number of rounded fixed-point terms folded in (for [`crate::nthdigit::error_units`]).
+/// The full C part (streaming, doc §4.4/§7): one sequential pass ([`stream_needs_and_chunks`])
+/// decides Main-item chunk boundaries and collects small-prime/cofactor Lucas and p-adic needs
+/// without ever holding a global factor table or item list; Main-item chunks are then
+/// regenerated and run through the ART in parallel ([`art_chunk_by_range`]); small-prime and
+/// cofactor Lucas items each get their own bounded ART sub-pass ([`resolve_lucas_items`]); then
+/// the usual Lucas/p-adic consumer passes. Returns `(C, term_count)`, `term_count` being the
+/// exact number of rounded fixed-point terms folded in (for [`crate::nthdigit::error_units`]).
 fn c_part(n: u64, p: Params2) -> (u128, u64) {
     use rayon::prelude::*;
     let (big_m, big_n) = (p.big_m, p.big_n);
     let base = 2 * big_m * big_n + 1;
     let lg_n = 64 - big_n.leading_zeros();
+    let m_max = base + 2 * (big_n - 1);
+    let small_primes = primes_upto((m_max as f64).sqrt() as u64 + 2);
 
-    let fac = factor_interval(big_m, big_n);
-    let mut items: Vec<Item> = Vec::new();
-    let mut lucas_need: HashMap<(u64, u64), Vec<(u64, u64)>> = HashMap::new();
-    let mut padic_need: HashMap<u64, Vec<(u64, u64, u32)>> = HashMap::new();
+    let needs = stream_needs_and_chunks(base, big_n, &small_primes, p.mem_bits);
 
-    for k in 0..big_n {
-        let t = k.min(big_n - 1 - k);
-        let mut good = 1u64;
-        for &(pp, e) in &fac[k as usize] {
-            if pp > t {
-                good *= pp.pow(e);
-            } else if e == 1 {
-                let r = t % pp;
-                lucas_need.entry((pp, r)).or_default().push((k, t));
-            } else {
-                padic_need.entry(pp).or_default().push((k, t, e));
-            }
-        }
-        if good > 1 {
-            items.push(Item {
-                t,
-                q: good,
-                tag: Tag::Main(k),
-            });
-        }
-    }
-    for &(p_, r) in lucas_need.keys() {
-        items.push(Item {
+    // Main items: regenerate + run each chunk independently, in parallel.
+    let (main_acc, main_terms) = needs
+        .chunk_bounds
+        .par_iter()
+        .map(|&(t0, t1)| art_chunk_by_range(n, big_n, base, &small_primes, t0, t1, lg_n))
+        .reduce(
+            || (0u128, 0u64),
+            |(a1, t1), (a2, t2)| (a1.wrapping_add(a2), t1 + t2),
+        );
+
+    // Small-prime Lucas items: their own bounded ART sub-pass (targets <= sqrt(max m_k), doc
+    // §4.4 "process small primes in their own pass with their own small ART").
+    let mut small_items: Vec<Item> = needs
+        .lucas_small
+        .keys()
+        .map(|&(p_, r)| Item {
             t: r,
             q: p_,
             tag: Tag::Lucas(p_, r),
-        });
+        })
+        .collect();
+    let small_lucas_val = resolve_lucas_items(n, big_n, base, &mut small_items, p.mem_bits, lg_n);
+    let (lucas_acc, lucas_terms) =
+        lucas_consumers(n, big_n, base, &needs.lucas_small, &small_lucas_val);
+    let (padic_acc, padic_terms) = padic_consumers(n, big_n, base, &needs.padic_small);
+
+    // Cofactor Lucas items (doc §7: the one piece whose count isn't bounded independent of N —
+    // regroup the raw (p, k, t) triples by (p, r) first, same shape as lucas_small, then reuse
+    // the exact same machinery.
+    let mut cofactor_need: HashMap<(u64, u64), Vec<(u64, u64)>> = HashMap::new();
+    for (p_, k, t) in needs.cofactor {
+        cofactor_need.entry((p_, t % p_)).or_default().push((k, t));
     }
-    items.sort_by_key(|it| it.t);
-
-    let bounds = chunk_bounds(&items, p.mem_bits);
-    let (art_acc, art_terms, lucas_val): (u128, u64, HashMap<(u64, u64), LucasVal>) = bounds
-        .par_iter()
-        .map(|&(lo, hi)| art_chunk(n, big_n, base, &items[lo..hi], lg_n))
-        .fold(
-            || (0u128, 0u64, HashMap::new()),
-            |(mut acc, mut terms, mut map), (a, t, pairs)| {
-                acc = acc.wrapping_add(a);
-                terms += t;
-                for (k, v) in pairs {
-                    map.insert(k, v);
-                }
-                (acc, terms, map)
-            },
-        )
-        .reduce(
-            || (0u128, 0u64, HashMap::new()),
-            |(a1, t1, mut m1), (a2, t2, m2)| {
-                m1.extend(m2);
-                (a1.wrapping_add(a2), t1 + t2, m1)
-            },
-        );
-
-    let (lucas_acc, lucas_terms) = lucas_consumers(n, big_n, base, &lucas_need, &lucas_val);
-    let (padic_acc, padic_terms) = padic_consumers(n, big_n, base, &padic_need);
+    let mut cofactor_items: Vec<Item> = cofactor_need
+        .keys()
+        .map(|&(p_, r)| Item {
+            t: r,
+            q: p_,
+            tag: Tag::Lucas(p_, r),
+        })
+        .collect();
+    let cofactor_lucas_val =
+        resolve_lucas_items(n, big_n, base, &mut cofactor_items, p.mem_bits, lg_n);
+    let (cofactor_acc, cofactor_terms) =
+        lucas_consumers(n, big_n, base, &cofactor_need, &cofactor_lucas_val);
 
     (
-        art_acc.wrapping_add(lucas_acc).wrapping_add(padic_acc),
-        art_terms + lucas_terms + padic_terms,
+        main_acc
+            .wrapping_add(lucas_acc)
+            .wrapping_add(padic_acc)
+            .wrapping_add(cofactor_acc),
+        main_terms + lucas_terms + padic_terms + cofactor_terms,
     )
 }
 
