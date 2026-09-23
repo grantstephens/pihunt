@@ -70,10 +70,14 @@
 //! resolve, so the guard is doubled and the whole computation retried.
 
 // `rug` is only a non-dev dependency under `gmp` (see bignum.rs's module docs); under `pure`
-// it's still a dev-dependency (tests cross-check against it), so this import stays available
-// for `#[cfg(test)]` code even when `gmp` is off.
+// it's still a dev-dependency (tests cross-check against it), so these imports stay available
+// for `#[cfg(test)]` code even when `gmp` is off. `Float`/`Constant` are only used by the
+// `gmp`-only MPFR fallback below, so they're gated tighter than `Integer`/`Pow` (used by tests
+// under both backends), to avoid an unused-import warning under `pure`.
+#[cfg(feature = "gmp")]
+use rug::{Float, float::Constant};
 #[cfg(any(feature = "gmp", test))]
-use rug::{Float, Integer, float::Constant, ops::Pow};
+use rug::{Integer, ops::Pow};
 
 use crate::par::{maybe_into_par_iter, maybe_join, maybe_reduce};
 #[cfg(feature = "parallel")]
@@ -689,42 +693,41 @@ fn c_sum_sieved(n: u64, p: Params) -> u128 {
     let segment_size = segment_size_for(big_n);
 
     let segment_starts: Vec<u64> = (0..big_n).step_by(segment_size as usize).collect();
-    let iter = maybe_into_par_iter!(segment_starts)
-        .map(|k0| {
-            let len = segment_size.min(big_n - k0);
-            #[cfg(feature = "nthdigit-profile")]
-            let t0 = std::time::Instant::now();
-            let factors = factor_segment(c0, k0, len, &small_primes);
-            #[cfg(feature = "nthdigit-profile")]
-            {
-                FACTOR_NS.fetch_add(
-                    t0.elapsed().as_nanos() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-            }
-            #[cfg(feature = "nthdigit-profile")]
-            let t1 = std::time::Instant::now();
-            let e1 = big_n - 2;
-            let e2 = n - big_n + 2;
-            let mut partial = 0u128;
-            for (i, prime_factors) in factors.iter().enumerate() {
-                let k = k0 + i as u64;
-                let m = c0 + 2 * k;
-                let s = sum_binomials_mod_sieved(big_n, k, m, prime_factors);
-                let pow5 = powmod(5, e1, m);
-                let pow10 = powmod(10, e2, m);
-                let y = mulmod(mulmod(pow5, pow10, m), s, m);
-                partial = partial.wrapping_add(signed(frac_fixed_point(y, m), k));
-            }
-            #[cfg(feature = "nthdigit-profile")]
-            {
-                LOOP_NS.fetch_add(
-                    t1.elapsed().as_nanos() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-            }
-            partial
-        });
+    let iter = maybe_into_par_iter!(segment_starts).map(|k0| {
+        let len = segment_size.min(big_n - k0);
+        #[cfg(feature = "nthdigit-profile")]
+        let t0 = std::time::Instant::now();
+        let factors = factor_segment(c0, k0, len, &small_primes);
+        #[cfg(feature = "nthdigit-profile")]
+        {
+            FACTOR_NS.fetch_add(
+                t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        #[cfg(feature = "nthdigit-profile")]
+        let t1 = std::time::Instant::now();
+        let e1 = big_n - 2;
+        let e2 = n - big_n + 2;
+        let mut partial = 0u128;
+        for (i, prime_factors) in factors.iter().enumerate() {
+            let k = k0 + i as u64;
+            let m = c0 + 2 * k;
+            let s = sum_binomials_mod_sieved(big_n, k, m, prime_factors);
+            let pow5 = powmod(5, e1, m);
+            let pow10 = powmod(10, e2, m);
+            let y = mulmod(mulmod(pow5, pow10, m), s, m);
+            partial = partial.wrapping_add(signed(frac_fixed_point(y, m), k));
+        }
+        #[cfg(feature = "nthdigit-profile")]
+        {
+            LOOP_NS.fetch_add(
+                t1.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        partial
+    });
     maybe_reduce!(iter, || 0u128, u128::wrapping_add)
 }
 

@@ -1129,8 +1129,8 @@ fn resolve_lucas_items(
 ) -> HashMap<(u64, u64), LucasVal> {
     items.sort_by_key(|it| it.t);
     let bounds = chunk_bounds(items, mem_bits);
-    let mapped = maybe_par_iter!(&bounds)
-        .map(|&(lo, hi)| art_chunk(n, big_n, base, &items[lo..hi], lg_n).2);
+    let mapped =
+        maybe_par_iter!(&bounds).map(|&(lo, hi)| art_chunk(n, big_n, base, &items[lo..hi], lg_n).2);
     #[cfg(feature = "parallel")]
     {
         mapped
@@ -1182,42 +1182,40 @@ fn lucas_consumers(
     lucas_need: &HashMap<u64, SideRanges>,
     lucas_val: &HashMap<(u64, u64), LucasVal>,
 ) -> (u128, u64) {
-    let iter = maybe_par_iter!(lucas_need)
-        .map(|(&p, ranges)| {
-            let mut cache = HashMap::new();
-            let mut acc = 0u128;
-            let mut terms = 0u64;
-            for (is_high, range) in [(false, ranges.lo), (true, ranges.hi)] {
-                let Some((t_min, t_max)) = range else {
-                    continue;
-                };
-                let r = t_min % p;
-                let (sr, cr) = lucas_val[&(p, r)];
-                let mut t = t_min;
-                loop {
-                    let k = if is_high { big_n - 1 - t } else { t };
-                    // The "exactly e == 1" set has holes at the p^2 sub-progression (those k
-                    // belong to padic_small instead, doc §4.3's e>=2 case): a SideRanges range
-                    // only pins down min/max t, not that every step in between is a member, so
-                    // skip anything p^2 also divides here rather than double- or mis-counting.
-                    if !(base + 2 * k).is_multiple_of(p * p) {
-                        let s = lucas_s(big_n, t, p, sr, cr, &mut cache);
-                        acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, p, s));
-                        terms += 1;
-                    }
-                    if t == t_max {
-                        break;
-                    }
-                    t += p;
+    let iter = maybe_par_iter!(lucas_need).map(|(&p, ranges)| {
+        let mut cache = HashMap::new();
+        let mut acc = 0u128;
+        let mut terms = 0u64;
+        for (is_high, range) in [(false, ranges.lo), (true, ranges.hi)] {
+            let Some((t_min, t_max)) = range else {
+                continue;
+            };
+            let r = t_min % p;
+            let (sr, cr) = lucas_val[&(p, r)];
+            let mut t = t_min;
+            loop {
+                let k = if is_high { big_n - 1 - t } else { t };
+                // The "exactly e == 1" set has holes at the p^2 sub-progression (those k
+                // belong to padic_small instead, doc §4.3's e>=2 case): a SideRanges range
+                // only pins down min/max t, not that every step in between is a member, so
+                // skip anything p^2 also divides here rather than double- or mis-counting.
+                if !(base + 2 * k).is_multiple_of(p * p) {
+                    let s = lucas_s(big_n, t, p, sr, cr, &mut cache);
+                    acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, p, s));
+                    terms += 1;
                 }
+                if t == t_max {
+                    break;
+                }
+                t += p;
             }
-            (acc, terms)
-        });
-    maybe_reduce!(
-        iter,
-        || (0u128, 0u64),
-        |(a1, c1), (a2, c2)| (a1.wrapping_add(a2), c1 + c2)
-    )
+        }
+        (acc, terms)
+    });
+    maybe_reduce!(iter, || (0u128, 0u64), |(a1, c1), (a2, c2)| (
+        a1.wrapping_add(a2),
+        c1 + c2
+    ))
 }
 
 /// `v_p(base + 2k)`: the exact p-adic valuation of `m_k`, by trial division. Cheap (`e` is
@@ -1248,47 +1246,45 @@ fn padic_consumers(
     padic_need: &HashMap<u64, SideRanges>,
     m_max: u64,
 ) -> (u128, u64) {
-    let iter = maybe_par_iter!(padic_need)
-        .map(|(&p, ranges)| {
-            // Safe emax bound: the largest e with p^e <= m_max (m_k never exceeds m_max), since
-            // we no longer track each k's actual e up front (see padic_valuation's docs). p >=
-            // 3 always (m_k is odd), so this loop is O(log_3 m_max) at worst, negligible.
-            let mut emax = 2u32;
-            while (p as u128).pow(emax + 1) <= m_max as u128 {
-                emax += 1;
-            }
-            let mut pb = PadicBinom::new(p, emax);
-            let mut acc = 0u128;
-            let mut terms = 0u64;
-            let step = p * p;
-            for (is_high, range) in [(false, ranges.lo), (true, ranges.hi)] {
-                let Some((t_min, t_max)) = range else {
-                    continue;
-                };
-                let mut t = t_min;
-                loop {
-                    let k = if is_high { big_n - 1 - t } else { t };
-                    let e = padic_valuation(base, k, p);
-                    // Bounds memo_s/memo_c to one query's recursion tree instead of letting
-                    // them grow with the range's length — see PadicBinom's field docs.
-                    pb.clear_query_memo();
-                    let s = pb.s(big_n, t as i64, e);
-                    let q = pb.pow_p[e as usize];
-                    acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, q, s));
-                    terms += 1;
-                    if t == t_max {
-                        break;
-                    }
-                    t += step;
+    let iter = maybe_par_iter!(padic_need).map(|(&p, ranges)| {
+        // Safe emax bound: the largest e with p^e <= m_max (m_k never exceeds m_max), since
+        // we no longer track each k's actual e up front (see padic_valuation's docs). p >=
+        // 3 always (m_k is odd), so this loop is O(log_3 m_max) at worst, negligible.
+        let mut emax = 2u32;
+        while (p as u128).pow(emax + 1) <= m_max as u128 {
+            emax += 1;
+        }
+        let mut pb = PadicBinom::new(p, emax);
+        let mut acc = 0u128;
+        let mut terms = 0u64;
+        let step = p * p;
+        for (is_high, range) in [(false, ranges.lo), (true, ranges.hi)] {
+            let Some((t_min, t_max)) = range else {
+                continue;
+            };
+            let mut t = t_min;
+            loop {
+                let k = if is_high { big_n - 1 - t } else { t };
+                let e = padic_valuation(base, k, p);
+                // Bounds memo_s/memo_c to one query's recursion tree instead of letting
+                // them grow with the range's length — see PadicBinom's field docs.
+                pb.clear_query_memo();
+                let s = pb.s(big_n, t as i64, e);
+                let q = pb.pow_p[e as usize];
+                acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, q, s));
+                terms += 1;
+                if t == t_max {
+                    break;
                 }
+                t += step;
             }
-            (acc, terms)
-        });
-    maybe_reduce!(
-        iter,
-        || (0u128, 0u64),
-        |(a1, c1), (a2, c2)| (a1.wrapping_add(a2), c1 + c2)
-    )
+        }
+        (acc, terms)
+    });
+    maybe_reduce!(iter, || (0u128, 0u64), |(a1, c1), (a2, c2)| (
+        a1.wrapping_add(a2),
+        c1 + c2
+    ))
 }
 
 /// The full C part (streaming, doc §4.4/§7): one sequential pass ([`stream_needs_and_chunks`])
