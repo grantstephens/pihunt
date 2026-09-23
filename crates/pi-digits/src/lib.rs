@@ -10,6 +10,7 @@ pub mod bignum;
 pub mod mem_profile;
 pub mod nthdigit;
 pub mod nthdigit2;
+mod par;
 pub mod pi_ref;
 
 /// Decimal digits → bits, rounded up.

@@ -141,6 +141,9 @@ use crate::bignum::Big;
 use crate::nthdigit::{
     self, MAX_N0, extract_digits, frac_fixed_point, mod_inverse, mulmod, powmod, signed,
 };
+use crate::par::{maybe_join, maybe_par_iter, maybe_reduce};
+#[cfg(feature = "parallel")]
+use rayon::iter::ParallelIterator as _;
 use std::collections::HashMap;
 
 /// Cache of Lucas' theorem's per-digit binomial row + prefix sums, keyed `(prime, digit
@@ -1124,20 +1127,29 @@ fn resolve_lucas_items(
     mem_bits: u64,
     lg_n: u32,
 ) -> HashMap<(u64, u64), LucasVal> {
-    use rayon::prelude::*;
     items.sort_by_key(|it| it.t);
     let bounds = chunk_bounds(items, mem_bits);
-    bounds
-        .par_iter()
-        .map(|&(lo, hi)| art_chunk(n, big_n, base, &items[lo..hi], lg_n).2)
-        .fold(HashMap::new, |mut map, pairs| {
+    let mapped = maybe_par_iter!(&bounds)
+        .map(|&(lo, hi)| art_chunk(n, big_n, base, &items[lo..hi], lg_n).2);
+    #[cfg(feature = "parallel")]
+    {
+        mapped
+            .fold(HashMap::new, |mut map, pairs| {
+                map.extend(pairs);
+                map
+            })
+            .reduce(HashMap::new, |mut m1, m2| {
+                m1.extend(m2);
+                m1
+            })
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        mapped.fold(HashMap::new(), |mut map, pairs| {
             map.extend(pairs);
             map
         })
-        .reduce(HashMap::new, |mut m1, m2| {
-            m1.extend(m2);
-            m1
-        })
+    }
 }
 
 /// One [`Tag::Lucas`] ART item per populated side of every prime in `need` (doc §4.4: "all `k`
@@ -1170,9 +1182,7 @@ fn lucas_consumers(
     lucas_need: &HashMap<u64, SideRanges>,
     lucas_val: &HashMap<(u64, u64), LucasVal>,
 ) -> (u128, u64) {
-    use rayon::prelude::*;
-    lucas_need
-        .par_iter()
+    let iter = maybe_par_iter!(lucas_need)
         .map(|(&p, ranges)| {
             let mut cache = HashMap::new();
             let mut acc = 0u128;
@@ -1202,11 +1212,12 @@ fn lucas_consumers(
                 }
             }
             (acc, terms)
-        })
-        .reduce(
-            || (0u128, 0u64),
-            |(a1, c1), (a2, c2)| (a1.wrapping_add(a2), c1 + c2),
-        )
+        });
+    maybe_reduce!(
+        iter,
+        || (0u128, 0u64),
+        |(a1, c1), (a2, c2)| (a1.wrapping_add(a2), c1 + c2)
+    )
 }
 
 /// `v_p(base + 2k)`: the exact p-adic valuation of `m_k`, by trial division. Cheap (`e` is
@@ -1237,9 +1248,7 @@ fn padic_consumers(
     padic_need: &HashMap<u64, SideRanges>,
     m_max: u64,
 ) -> (u128, u64) {
-    use rayon::prelude::*;
-    padic_need
-        .par_iter()
+    let iter = maybe_par_iter!(padic_need)
         .map(|(&p, ranges)| {
             // Safe emax bound: the largest e with p^e <= m_max (m_k never exceeds m_max), since
             // we no longer track each k's actual e up front (see padic_valuation's docs). p >=
@@ -1274,11 +1283,12 @@ fn padic_consumers(
                 }
             }
             (acc, terms)
-        })
-        .reduce(
-            || (0u128, 0u64),
-            |(a1, c1), (a2, c2)| (a1.wrapping_add(a2), c1 + c2),
-        )
+        });
+    maybe_reduce!(
+        iter,
+        || (0u128, 0u64),
+        |(a1, c1), (a2, c2)| (a1.wrapping_add(a2), c1 + c2)
+    )
 }
 
 /// The full C part (streaming, doc §4.4/§7): one sequential pass ([`stream_needs_and_chunks`])
@@ -1289,7 +1299,6 @@ fn padic_consumers(
 /// the usual Lucas/p-adic consumer passes. Returns `(C, term_count)`, `term_count` being the
 /// exact number of rounded fixed-point terms folded in (for [`crate::nthdigit::error_units`]).
 fn c_part(n: u64, p: Params2) -> (u128, u64) {
-    use rayon::prelude::*;
     let (big_m, big_n) = (p.big_m, p.big_n);
     let base = 2 * big_m * big_n + 1;
     let lg_n = 64 - big_n.leading_zeros();
@@ -1303,14 +1312,13 @@ fn c_part(n: u64, p: Params2) -> (u128, u64) {
     crate::mem_profile::checkpoint("c_part: after stream_needs_and_chunks");
 
     // Main items: regenerate + run each chunk independently, in parallel.
-    let (main_acc, main_terms) = needs
-        .chunk_bounds
-        .par_iter()
-        .map(|&(t0, t1)| art_chunk_by_range(n, big_n, base, &small_primes, t0, t1, lg_n))
-        .reduce(
-            || (0u128, 0u64),
-            |(a1, t1), (a2, t2)| (a1.wrapping_add(a2), t1 + t2),
-        );
+    let main_iter = maybe_par_iter!(&needs.chunk_bounds)
+        .map(|&(t0, t1)| art_chunk_by_range(n, big_n, base, &small_primes, t0, t1, lg_n));
+    let (main_acc, main_terms) = maybe_reduce!(
+        main_iter,
+        || (0u128, 0u64),
+        |(a1, t1), (a2, t2)| (a1.wrapping_add(a2), t1 + t2)
+    );
     crate::mem_profile::checkpoint("c_part: after Main chunks");
 
     // Small-prime Lucas items: their own bounded ART sub-pass (targets <= sqrt(max m_k), doc
@@ -1388,7 +1396,7 @@ fn log_needs_sizes(needs: &StreamNeeds, small_primes: &[u64]) {
 pub fn frac_10n_pi_m_with_terms(n: u64, n0: u32, mem_bits: u64) -> (u128, u64) {
     let p = Params2::new(n, n0, mem_bits);
     let b_terms = (p.big_m + 1) * p.big_n;
-    let (b, (c, c_terms)) = rayon::join(|| nthdigit::b_sum(n, b_terms), || c_part(n, p));
+    let (b, (c, c_terms)) = maybe_join!(|| nthdigit::b_sum(n, b_terms), || c_part(n, p));
     (b.wrapping_sub(c), b_terms + c_terms)
 }
 

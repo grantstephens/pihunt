@@ -6,10 +6,11 @@ edition = "2024"
 [features]
 default = ["gmp", "parallel"]
 # Uses GMP/MPFR (via `rug`) for the bignum backend.
-gmp = []
-# Placeholder for the pure-Rust bignum backend (added in a later task).
-pure = []
-parallel = []
+gmp = ["dep:rug", "dep:gmp-mpfr-sys"]
+# Pure-Rust bignum backend (via `dashu-int`), for targets without GMP (e.g. WASM).
+pure = ["dep:dashu-int", "dep:dashu-base"]
+# rayon-based parallelism; off for targets without threads (e.g. WASM).
+parallel = ["dep:rayon"]
 # Temporary, throwaway profiling instrumentation for nthdigit.rs's C-sum (factoring
 # time vs binomial-loop time). Not meant to ship enabled; see docs/nthdigit.md.
 nthdigit-profile = []
@@ -20,5 +21,16 @@ nthdigit-profile = []
 mem-profile = []
 
 [dependencies]
-rayon = "1.12.0"
+rayon = { version = "1.12.0", optional = true }
+rug = { version = "1.30.0", optional = true }
+# Link the system GMP/MPFR instead of building them from source (matches the root crate's pin;
+# without this, building pi-digits standalone under `gmp` compiles GMP/MPFR from source).
+gmp-mpfr-sys = { version = "1.7.1", features = ["use-system-libs"], optional = true }
+dashu-int = { version = "0.4.3", optional = true }
+dashu-base = { version = "0.4.3", optional = true }
+
+[dev-dependencies]
+# So MPFR cross-checks in tests/ work under both backends (see tests/bignum.rs, tests/nthdigit.rs,
+# tests/nthdigit2.rs, tests/pi_ref.rs).
 rug = "1.30.0"
+gmp-mpfr-sys = { version = "1.7.1", features = ["use-system-libs"] }

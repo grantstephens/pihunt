@@ -69,7 +69,15 @@
 //! value is too close to a rounding boundary (e.g. a run of `9`s or `0`s) for this guard to
 //! resolve, so the guard is doubled and the whole computation retried.
 
+// `rug` is only a non-dev dependency under `gmp` (see bignum.rs's module docs); under `pure`
+// it's still a dev-dependency (tests cross-check against it), so this import stays available
+// for `#[cfg(test)]` code even when `gmp` is off.
+#[cfg(any(feature = "gmp", test))]
 use rug::{Float, Integer, float::Constant, ops::Pow};
+
+use crate::par::{maybe_into_par_iter, maybe_join, maybe_reduce};
+#[cfg(feature = "parallel")]
+use rayon::iter::ParallelIterator as _;
 
 // ---------------------------------------------------------------------------------
 // Parameters (Gourdon Algorithm 1, step 1 / eq. 8)
@@ -523,7 +531,7 @@ const MIN_SEGMENT_SIZE: u64 = 64;
 /// [`MIN_SEGMENT_SIZE`]). Scales with `N`, not fixed, precisely so it keeps giving rayon
 /// enough independent tasks to load-balance regardless of how big the run is.
 fn segment_size_for(big_n: u64) -> u64 {
-    let threads = rayon::current_num_threads().max(1) as u64;
+    let threads = crate::par::current_threads();
     (big_n / (threads * SEGMENTS_PER_THREAD)).max(MIN_SEGMENT_SIZE)
 }
 
@@ -634,16 +642,13 @@ pub(crate) fn signed(term: u128, k: u64) -> u128 {
 }
 
 pub(crate) fn b_sum(n: u64, terms: u64) -> u128 {
-    use rayon::prelude::*;
-    (0..terms)
-        .into_par_iter()
-        .map(|k| {
-            let m = 2 * k + 1;
-            let pow10 = powmod(10, n, m);
-            let x = mulmod(4 % m, pow10, m);
-            signed(frac_fixed_point(x, m), k)
-        })
-        .reduce(|| 0u128, u128::wrapping_add)
+    let iter = maybe_into_par_iter!(0..terms).map(|k| {
+        let m = 2 * k + 1;
+        let pow10 = powmod(10, n, m);
+        let x = mulmod(4 % m, pow10, m);
+        signed(frac_fixed_point(x, m), k)
+    });
+    maybe_reduce!(iter, || 0u128, u128::wrapping_add)
 }
 
 fn c_sum(n: u64, p: Params) -> u128 {
@@ -657,21 +662,18 @@ fn c_sum(n: u64, p: Params) -> u128 {
 /// The strict-`O(log^2 n)`-memory C-sum: one rayon task per `k`, `O(k)` trial division to
 /// find `m_k`'s prime factors `<= k` (see [`USE_SIEVED_FACTORING`]).
 fn c_sum_trial_division(n: u64, p: Params) -> u128 {
-    use rayon::prelude::*;
     let (big_n, big_m) = (p.big_n, p.m);
-    (0..big_n)
-        .into_par_iter()
-        .map(|k| {
-            let m = 2 * big_m * big_n + 2 * k + 1;
-            let s = sum_binomials_mod(big_n, k, m);
-            let e1 = big_n - 2;
-            let e2 = n - big_n + 2;
-            let pow5 = powmod(5, e1, m);
-            let pow10 = powmod(10, e2, m);
-            let y = mulmod(mulmod(pow5, pow10, m), s, m);
-            signed(frac_fixed_point(y, m), k)
-        })
-        .reduce(|| 0u128, u128::wrapping_add)
+    let iter = maybe_into_par_iter!(0..big_n).map(|k| {
+        let m = 2 * big_m * big_n + 2 * k + 1;
+        let s = sum_binomials_mod(big_n, k, m);
+        let e1 = big_n - 2;
+        let e2 = n - big_n + 2;
+        let pow5 = powmod(5, e1, m);
+        let pow10 = powmod(10, e2, m);
+        let y = mulmod(mulmod(pow5, pow10, m), s, m);
+        signed(frac_fixed_point(y, m), k)
+    });
+    maybe_reduce!(iter, || 0u128, u128::wrapping_add)
 }
 
 /// The segmented-sieve C-sum: `k in 0..N` is chunked into [`segment_size_for`]-sized ranges,
@@ -680,7 +682,6 @@ fn c_sum_trial_division(n: u64, p: Params) -> u128 {
 /// Algorithm 2's `O(k)` binomial loop for every `k` in the segment using the factors just
 /// found (via [`sum_binomials_mod_sieved`]) instead of re-deriving them by trial division.
 fn c_sum_sieved(n: u64, p: Params) -> u128 {
-    use rayon::prelude::*;
     let (big_n, big_m) = (p.big_n, p.m);
     let c0 = 2 * big_m * big_n + 1; // m_k = c0 + 2k, always odd
     let m_max = c0 + 2 * (big_n - 1);
@@ -688,8 +689,7 @@ fn c_sum_sieved(n: u64, p: Params) -> u128 {
     let segment_size = segment_size_for(big_n);
 
     let segment_starts: Vec<u64> = (0..big_n).step_by(segment_size as usize).collect();
-    segment_starts
-        .into_par_iter()
+    let iter = maybe_into_par_iter!(segment_starts)
         .map(|k0| {
             let len = segment_size.min(big_n - k0);
             #[cfg(feature = "nthdigit-profile")]
@@ -724,8 +724,8 @@ fn c_sum_sieved(n: u64, p: Params) -> u128 {
                 );
             }
             partial
-        })
-        .reduce(|| 0u128, u128::wrapping_add)
+        });
+    maybe_reduce!(iter, || 0u128, u128::wrapping_add)
 }
 
 #[cfg(feature = "nthdigit-profile")]
@@ -750,7 +750,7 @@ pub fn profile_totals_ns() -> (u64, u64) {
 pub fn frac_10n_pi(n: u64, n0: u32) -> u128 {
     let p = Params::new(n, n0);
     let terms = (p.m + 1) * p.big_n;
-    let (b, c) = rayon::join(|| b_sum(n, terms), || c_sum(n, p));
+    let (b, c) = maybe_join!(|| b_sum(n, terms), || c_sum(n, p));
     b.wrapping_sub(c)
 }
 
