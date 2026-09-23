@@ -228,7 +228,12 @@ fn factor_interval(big_m: u64, big_n: u64) -> Vec<Vec<(u64, u32)>> {
 /// — see [`factor_interval`]'s docs for why there's at most one). `O(len)` memory for the
 /// duration of the call; `small_primes` is shared read-only across every window (built once per
 /// [`c_part`] run, `O(pi(sqrt(max m_k)))` words — explicitly within budget, doc §4.4/§7).
-fn factor_window(base: u64, k0: u64, len: u64, small_primes: &[u64]) -> (Vec<u64>, Vec<Vec<(u64, u32)>>) {
+fn factor_window(
+    base: u64,
+    k0: u64,
+    len: u64,
+    small_primes: &[u64],
+) -> (Vec<u64>, Vec<Vec<(u64, u32)>>) {
     let len_usize = len as usize;
     let mut rem: Vec<u64> = (0..len).map(|i| base + 2 * (k0 + i)).collect();
     let mut fac: Vec<Vec<(u64, u32)>> = vec![Vec::new(); len_usize];
@@ -335,7 +340,17 @@ fn stream_batch_size(half: u64) -> u64 {
 /// is inherently a running accumulation; factoring itself is a small fraction of total cost
 /// (doc §5.3, and the profiling note in `nthdigit.rs`'s module docs), so this doesn't cost
 /// parallelism where it matters.
-fn stream_needs_and_chunks(base: u64, big_n: u64, small_primes: &[u64], mem_bits: u64) -> StreamNeeds {
+///
+/// Requires `big_n` even (always true for a real run — [`Params2::new`] guarantees it — so the
+/// `t in [0, N/2)` pairing `(k = t, k = N-1-t)` covers every `k` exactly once with no leftover
+/// middle element).
+fn stream_needs_and_chunks(
+    base: u64,
+    big_n: u64,
+    small_primes: &[u64],
+    mem_bits: u64,
+) -> StreamNeeds {
+    debug_assert!(big_n.is_multiple_of(2), "big_n must be even, got {big_n}");
     let half = big_n / 2;
     let batch = stream_batch_size(half);
     let mut chunk_bounds = Vec::new();
@@ -1655,6 +1670,180 @@ mod tests {
                 let got2 = digits(n, count, mem_bits);
                 assert_eq!(got1, got2, "n={n} mem_bits={mem_bits}");
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Streamed item generation vs the old global (reference) construction: must produce
+    // exactly the same multiset of (target, modulus, tag) items, per the task's correctness
+    // gate. `factor_interval` above is kept #[cfg(test)] specifically to make this comparison
+    // possible.
+    // -----------------------------------------------------------------------------
+
+    /// `(Main items as (t,q,k), lucas_need, padic_need)`, the shape both
+    /// [`reference_construction`] and [`streamed_construction`] return for comparison.
+    type ConstructionResult = (
+        Vec<(u64, u64, u64)>,
+        HashMap<(u64, u64), Vec<(u64, u64)>>,
+        HashMap<u64, Vec<(u64, u64, u32)>>,
+    );
+
+    /// The old (global, non-streaming) item/need construction, i.e. exactly what `c_part` did
+    /// before streaming: every `k`'s complete factorisation via `factor_interval`, classified
+    /// into Main items / Lucas needs / p-adic needs in one pass with no windowing.
+    fn reference_construction(big_m: u64, big_n: u64) -> ConstructionResult {
+        let fac = factor_interval(big_m, big_n);
+        let mut main_items = Vec::new();
+        let mut lucas_need: HashMap<(u64, u64), Vec<(u64, u64)>> = HashMap::new();
+        let mut padic_need: HashMap<u64, Vec<(u64, u64, u32)>> = HashMap::new();
+        for k in 0..big_n {
+            let t = k.min(big_n - 1 - k);
+            let mut good = 1u64;
+            for &(pp, e) in &fac[k as usize] {
+                if pp > t {
+                    good *= pp.pow(e);
+                } else if e == 1 {
+                    lucas_need.entry((pp, t % pp)).or_default().push((k, t));
+                } else {
+                    padic_need.entry(pp).or_default().push((k, t, e));
+                }
+            }
+            if good > 1 {
+                main_items.push((t, good, k));
+            }
+        }
+        (main_items, lucas_need, padic_need)
+    }
+
+    /// The new streaming construction, gathering every chunk's Main items (regenerated exactly
+    /// as [`art_chunk_by_range`] would) plus the small-prime and (regrouped) cofactor Lucas
+    /// needs and the p-adic needs, into the same shape [`reference_construction`] returns, so
+    /// the two can be compared directly.
+    fn streamed_construction(big_m: u64, big_n: u64, mem_bits: u64) -> ConstructionResult {
+        let base = 2 * big_m * big_n + 1;
+        let m_max = base + 2 * (big_n - 1);
+        let small_primes = primes_upto((m_max as f64).sqrt() as u64 + 2);
+        let needs = stream_needs_and_chunks(base, big_n, &small_primes, mem_bits);
+
+        let mut main_items = Vec::new();
+        for &(t0, t1) in &needs.chunk_bounds {
+            let len = t1 - t0;
+            let (rem_lo, fac_lo) = factor_window(base, t0, len, &small_primes);
+            let (rem_hi, fac_hi) = factor_window(base, big_n - t1, len, &small_primes);
+            for t in t0..t1 {
+                let i_lo = (t - t0) as usize;
+                let i_hi = (t1 - 1 - t) as usize;
+                if let Some(q) = main_modulus(t, rem_lo[i_lo], &fac_lo[i_lo]) {
+                    main_items.push((t, q, t));
+                }
+                if let Some(q) = main_modulus(t, rem_hi[i_hi], &fac_hi[i_hi]) {
+                    main_items.push((t, q, big_n - 1 - t));
+                }
+            }
+        }
+
+        let mut combined_lucas = needs.lucas_small;
+        for (p, k, t) in needs.cofactor {
+            combined_lucas.entry((p, t % p)).or_default().push((k, t));
+        }
+        (main_items, combined_lucas, needs.padic_small)
+    }
+
+    #[test]
+    fn streamed_items_match_reference_construction() {
+        for &(big_m, big_n, mem_bits) in &[
+            (4u64, 60u64, 128u64),
+            (6, 200, 256),
+            (12, 734, 512),
+            (30, 4000, 1024),
+            (2, 52, 64), // small case
+        ] {
+            let (ref_main, ref_lucas, ref_padic) = reference_construction(big_m, big_n);
+            let (str_main, str_lucas, str_padic) = streamed_construction(big_m, big_n, mem_bits);
+
+            let mut a = ref_main.clone();
+            a.sort();
+            let mut b = str_main.clone();
+            b.sort();
+            assert_eq!(a, b, "Main (t,q,k) multiset differs: M={big_m} N={big_n}");
+
+            let mut la: Vec<_> = ref_lucas.keys().copied().collect();
+            la.sort();
+            let mut lb: Vec<_> = str_lucas.keys().copied().collect();
+            lb.sort();
+            assert_eq!(la, lb, "Lucas (p,r) key set differs: M={big_m} N={big_n}");
+            for key in &la {
+                let mut rv = ref_lucas[key].clone();
+                rv.sort();
+                let mut sv = str_lucas[key].clone();
+                sv.sort();
+                assert_eq!(
+                    rv, sv,
+                    "Lucas need-list differs for key={key:?}: M={big_m} N={big_n}"
+                );
+            }
+
+            let mut pa: Vec<_> = ref_padic.keys().copied().collect();
+            pa.sort();
+            let mut pb: Vec<_> = str_padic.keys().copied().collect();
+            pb.sort();
+            assert_eq!(pa, pb, "p-adic prime set differs: M={big_m} N={big_n}");
+            for p in &pa {
+                let mut rv = ref_padic[p].clone();
+                rv.sort();
+                let mut sv = str_padic[p].clone();
+                sv.sort();
+                assert_eq!(
+                    rv, sv,
+                    "p-adic need-list differs for p={p}: M={big_m} N={big_n}"
+                );
+            }
+
+            // Term count (every (k,t) pair, across Main + Lucas + p-adic, contributes exactly
+            // one add_contribution call) must match too.
+            let ref_terms = ref_main.len()
+                + ref_lucas.values().map(Vec::len).sum::<usize>()
+                + ref_padic.values().map(Vec::len).sum::<usize>();
+            let str_terms = str_main.len()
+                + str_lucas.values().map(Vec::len).sum::<usize>()
+                + str_padic.values().map(Vec::len).sum::<usize>();
+            assert_eq!(
+                ref_terms, str_terms,
+                "term count differs: M={big_m} N={big_n}"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_bounds_cover_target_range_exactly_once() {
+        for &(big_m, big_n, mem_bits) in &[
+            (4u64, 60u64, 128u64),
+            (6, 200, 256),
+            (12, 734, 512),
+            (30, 4000, 1024),
+            (96, 36_806, 4202), // n=1e5-scale M,N,mem_bits
+        ] {
+            let base = 2 * big_m * big_n + 1;
+            let m_max = base + 2 * (big_n - 1);
+            let small_primes = primes_upto((m_max as f64).sqrt() as u64 + 2);
+            let needs = stream_needs_and_chunks(base, big_n, &small_primes, mem_bits);
+            let half = big_n / 2;
+            let mut expected_start = 0u64;
+            for &(t0, t1) in &needs.chunk_bounds {
+                assert_eq!(
+                    t0, expected_start,
+                    "gap or overlap before chunk starting at {t0}: M={big_m} N={big_n}"
+                );
+                assert!(
+                    t1 > t0,
+                    "empty chunk window ({t0},{t1}): M={big_m} N={big_n}"
+                );
+                expected_start = t1;
+            }
+            assert_eq!(
+                expected_start, half,
+                "chunk windows don't cover [0, N/2) exactly: M={big_m} N={big_n}"
+            );
         }
     }
 }
