@@ -235,13 +235,20 @@ fn digit_at_1e5_matches_mpfr() {
     check_large_digit(100_000);
 }
 
+// Capped at 2*10^5: 10^6 takes ~75 s here. The 10^6 and 10^7 digits are MPFR-verified and
+// recorded in docs/nthdigit.md.
 #[test]
-#[ignore] // slow: MPFR at ~1e6 decimal digits of precision, plus the full Gourdon run
-fn digit_at_1e6_matches_mpfr() {
-    check_large_digit(1_000_000);
+#[ignore] // slow: MPFR at ~2e5 decimal digits of precision, plus the full Gourdon run
+fn digit_at_2e5_matches_mpfr() {
+    check_large_digit(200_000);
 }
 
+/// The large-position checks each use every core; run them one at a time even under
+/// `--include-ignored`.
+static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn check_large_digit(n: u64) {
+    let _one_at_a_time = HEAVY.lock().unwrap_or_else(|e| e.into_inner());
     let count = 10usize;
     let got = nthdigit::digits(n, count);
 

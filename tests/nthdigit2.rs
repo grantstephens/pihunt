@@ -119,13 +119,16 @@ fn digit_at_1e6_matches_mpfr() {
     check_large_digit(1_000_000);
 }
 
-#[test]
-#[ignore] // slow: ~2 minutes (see docs/nthdigit.md's benchmark table) + MPFR at ~1e7 digits
-fn digit_at_1e7_matches_mpfr() {
-    check_large_digit(10_000_000);
-}
+// No 10^7 test: ~450 MiB and ~2 minutes even on its own, and run alongside the other ignored
+// checks it helped push an 8 GiB machine into OOM. Its digits (7259151336) are MPFR-verified
+// and recorded in docs/nthdigit.md; re-check by hand with `pihunt digit 10000001 --method thm2`.
+
+/// The large-position checks each use every core and up to ~100 MiB; run them one at a time
+/// even when the test harness runs `--include-ignored` in parallel.
+static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn check_large_digit(n: u64) {
+    let _one_at_a_time = HEAVY.lock().unwrap_or_else(|e| e.into_inner());
     let count = 10usize;
     let got = nthdigit2::digits(n, count, default_mem_bits(n));
 

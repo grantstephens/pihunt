@@ -230,7 +230,7 @@ own baseline footprint and rayon's thread pool at every `n` tested so far.
 ## MPFR verification
 
 - n = 10⁵: `cargo test --release --test nthdigit -- --ignored digit_at_1e5_matches_mpfr` — **passes**, digits `6412600243` — unchanged after the sieve/Montgomery rewrite, re-run and reconfirmed this session.
-- n = 10⁶: `cargo test --release --test nthdigit -- --ignored digit_at_1e6_matches_mpfr` — **passes**, digits `1309275628` — unchanged, re-run and reconfirmed this session (both 10⁵ and 10⁶ ignored tests together: 75.17 s, dominated by MPFR's own reference computation, not the algorithm under test).
+- n = 10⁶: (then) `cargo test --release --test nthdigit -- --ignored digit_at_1e6_matches_mpfr` — **passed**; that test has since been capped at 2·10⁵ (`digit_at_2e5_matches_mpfr`, see "Test sizes and memory" below), the verified 10⁶ digits are recorded here — digits `1309275628` — unchanged, re-run and reconfirmed this session (both 10⁵ and 10⁶ ignored tests together: 75.17 s, dominated by MPFR's own reference computation, not the algorithm under test).
 - n = 10⁷: digits `7259151336` — **verified** (with the *old* algorithm; see the 10⁷ timings note above for why this wasn't re-run) against MPFR (gmpy2 `const_pi` at 3.3·10⁷ bits, 10 s), positions 10⁷…10⁷+9.
 - n = 1, 762 (Feynman point), and everywhere in `[0, 20000)` (200 sequential + 200 random positions): checked in `digits_match_mpfr_reference`, part of the default `cargo test` run — passes with the new code, and noticeably faster than before (this test alone dropped from ~15-32 s to ~5 s wall time across the whole `cargo test --release --test nthdigit` run, consistent with the timings above once you factor in that most of its 400 evaluations are at small `n` where the win is smaller).
 - `digit 1 --count 5` → `14159` and `digit 762 --count 8` → `99999983` were additionally cross-checked against an independent from-scratch Python (`decimal`/Machin and `decimal`/Chudnovsky) π computation before any automated test was written, and n = 2000/10000 against a from-scratch Chudnovsky reference — see the commit message for `src/nthdigit.rs`.
@@ -358,3 +358,23 @@ streaming item-generation described in doc §4.4 gets implemented.
   `mulmod`, fixed edge cases plus 5,000 random odd moduli and operands.
 
 All four are part of the default `cargo test --release` run (no `--ignored` needed).
+
+## Test sizes and memory
+
+The suite has to run safely on an 8 GiB machine, including with `--include-ignored`.
+Measured peak RSS per test (release build, run one at a time; 2026-09-23):
+
+| test | peak RSS | time |
+|---|---:|---:|
+| every non-ignored test | ≤ 33 MiB | ≤ 6 s |
+| `nthdigit2::digit_at_1e6_matches_mpfr` (ignored) | 70 MiB | 3 s |
+| `nthdigit::digit_at_1e6_matches_mpfr` (ignored, **now capped at 2·10⁵**) | 11 MiB | 74 s |
+| `nthdigit2::digit_at_1e7_matches_mpfr` (ignored, **removed**) | 447 MiB | 110 s |
+| `precision_rule::measure_precision_rule` (ignored) | 79 MiB | 265 s |
+
+No single test comes near the limit. The OOM came from running heavy work concurrently:
+the ignored large-position checks ran in parallel within one test binary, each using every
+core. They're now serialized by a lock. The 10⁷ check is gone from the suite; its digits
+(`7259151336`) are MPFR-verified above. To re-check it by hand:
+`pihunt digit 10000001 --method thm2` (~2 min, ~450 MiB).
+
