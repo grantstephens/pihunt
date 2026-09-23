@@ -46,17 +46,20 @@ exact 128-by-64 long division (`floor(x·2^128/m)`), so its representation error
 (one ulp). Terms accumulate via `wrapping_add`/`wrapping_sub`, which is exact arithmetic
 modulo 1 on this encoding (we only ever want `frac(B − C)`), so accumulation order doesn't
 matter and introduces no additional error. Total error after `(M+1)N + N` terms is
-`< ((M+1)N + N)·2^-128` — utterly negligible next to `2^-128` itself for any `n` this
-implementation could run in practice. The error that actually matters is Gourdon's
-truncation bound `π/(2eM)^N < 10^-(n+n0)`, which `n0` is chosen to satisfy; see
-`tests/nthdigit.rs::params_are_sane`.
+`< ((M+1)N + N)·2^-128`. That is tiny, but not negligible once `n0` gets large: by n ≈ 10⁹
+there are ~2^45 terms (~10^-25), so it caps how many digits one evaluation can certify.
+The certification bound (`error_units`) therefore adds one ulp per term to Gourdon's
+truncation bound `π/(2eM)^N < 10^-(n+n0)` (see `tests/nthdigit.rs::params_are_sane`), `n0`
+is capped at 24, and requests longer than 16 digits are split into independent chunks.
+(An earlier version omitted the rounding term; that was only unsound for n0 ≳ 28, i.e. for
+long `--count` requests or a pathological boundary retry, and is fixed.)
 
 ## Digit-boundary safety
 
 `digits(n, count)` never returns a digit it can't certify. It picks `n0 = count + guard`
 (guard starts at 4), computes `x = frac_10n_pi(n, n0)`, and re-extracts the requested
-`count` digits from `x`, `x + err` and `x − err` (`err` = the `10^-n0` bound in fixed-point
-units). If all three agree, the digits are certified and returned; if not (the true value
+`count` digits from `x`, `x + err` and `x − err` (`err` = the `10^-n0` truncation bound plus
+one ulp per term, in fixed-point units). If all three agree, the digits are certified and returned; if not (the true value
 sits too close to a run of `9`s or `0`s for this guard to resolve), the guard doubles and
 the whole computation retries. For `n` below 2000, or too small relative to `n0` for
 Gourdon's method to apply (`n < 4·n0`), it falls back to computing π directly with MPFR
@@ -95,9 +98,8 @@ there's no real "Gourdon-algorithm" timing to report at 10³ here (the fallback 
 **10⁷ note, stated plainly:** the spec asked for this row only "if it finishes within ~30
 min". It didn't — it took ~1h 58m, about 60× the n=10⁶ time (roughly in line with the
 n=10⁵→10⁶ ratio of ~54×, so the observed scaling is consistent, just past the time budget).
-It's included above anyway because it did finish and the number is real and was checked
-against nothing more than its own internal consistency (no MPFR cross-check was run at
-10⁷ given the time already spent — see below). Take the 10⁷ row as "it works and the memory
+It's included above anyway because it did finish and the number is real; its digits were
+later verified against MPFR (see below). Take the 10⁷ row as "it works and the memory
 stays flat," not as a benchmark result to compare against a 30-minute budget.
 
 The very flat RSS confirms the `O(log² n)` memory claim directly: essentially all of the
@@ -108,6 +110,6 @@ scales with `n`.
 
 - n = 10⁵: `cargo test --release --test nthdigit -- --ignored digit_at_1e5_matches_mpfr` — **passes**, digits `6412600243`.
 - n = 10⁶: `cargo test --release --test nthdigit -- --ignored digit_at_1e6_matches_mpfr` — **passes**, digits `1309275628`, run twice (once before an unrelated session interruption, once after, both green); the MPFR reference computation itself takes ~100-115 s (computing π to ~1,000,000+ decimal digits of MPFR precision, once, to check against).
-- n = 10⁷: **not verified against MPFR** — digits `7259151336` (self-consistent, i.e. the digit-boundary retry logic accepted it on the first pass with guard=4, but nothing external checked it). Given the run already blew through the 30-minute target, spending several more minutes on an MPFR reference at 10⁷ decimal digits didn't seem like the best use of the remaining time; if this number matters, it should be checked before being trusted.
+- n = 10⁷: digits `7259151336` — **verified** afterwards against MPFR (gmpy2 `const_pi` at 3.3·10⁷ bits, 10 s), positions 10⁷…10⁷+9.
 - n = 1, 762 (Feynman point), and everywhere in `[0, 20000)` (200 sequential + 200 random positions): checked in `digits_match_mpfr_reference`, part of the default `cargo test` run.
 - `digit 1 --count 5` → `14159` and `digit 762 --count 8` → `99999983` were additionally cross-checked against an independent from-scratch Python (`decimal`/Machin and `decimal`/Chudnovsky) π computation before any automated test was written, and n = 2000/10000 against a from-scratch Chudnovsky reference — see the commit message for `src/nthdigit.rs`.
