@@ -253,3 +253,12 @@ clobber each other's log even when run on one machine; resume reads that shard's
 
 Malformed specs (`0/4`, `5/4`, `2/0`, non-numeric) are rejected at CLI parse time with a
 non-zero exit and an `error: ...` message.
+
+## Stage 3: precision rule (2026-09-22/23)
+
+`auto_digits`'s flat factor 1.5 (measured at n ≈ 45) was too thin at n ≈ 100: jobs came back
+`Inconclusive` (reduction hit a precision-floor relation) or `Suspicious` (main search did the
+same), both correctly rejected but expensive to discover — the runner's fix is to escalate and
+redo the whole job from scratch. `auto_digits` now grows the factor past n ≈ 36 based on direct
+measurement instead of guessing further. Full measurement table, the fitted rule, and a
+before/after run of the reported n = 100 example are in `docs/precision-rule.md`.
