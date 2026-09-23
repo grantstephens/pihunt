@@ -65,11 +65,17 @@
 //!   working set — product tree, `(P,T,D)` state, one group's binary-splitting stack, per chunk
 //!   — stays `O(mem_bits log(mem_bits))` bits (doc §5.1), run in parallel across chunks.
 //! * Small-prime Lucas/p-adic needs (`p <= sqrt(max m_k)`, doc §4.3) are collected into
-//!   `HashMap`s bounded by `O(pi(sqrt(max m_k)))` entries (at most two `(p, r)` keys per prime,
-//!   doc §4.4: "the k with p | m_k form an arithmetic progression... share one or two such
-//!   items") and resolved by their own small dedicated ART sub-pass
-//!   ([`resolve_lucas_items`]) — doc §4.4's "process small primes in their own pass with their
-//!   own small ART". p-adic tables (`O(p)` words per prime, doc §5.2) are still built and
+//!   `HashMap<u64, SideRanges>`s (see [`SideRanges`]'s docs) bounded by `O(pi(sqrt(max m_k)))`
+//!   entries and resolved by their own small dedicated ART sub-pass ([`resolve_lucas_items`]) —
+//!   doc §4.4's "process small primes in their own pass with their own small ART". **This used
+//!   to be the dominant term** (see "What was actually dominant" below) until the `SideRanges`
+//!   fix: earlier, each key held a `Vec<(k, t[, e])>` of every matching `k`, which sums to `O(N
+//!   loglog sqrt(max m_k))` words over all keys (Mertens' third theorem: `Σ_{p<=P} 1/p ~ loglog
+//!   P`), not the `O(pi(sqrt(max m_k)))` this section always *claimed*. `SideRanges` fixes that:
+//!   for a fixed prime and side (low `k=t` / high `k=N-1-t`), the matching `k` form one
+//!   arithmetic progression, so only its first/last `t` needs storing (two `u64`s), and
+//!   consumers ([`lucas_consumers`], [`padic_consumers`]) regenerate `(k, t)` pairs on the fly by
+//!   walking that range. p-adic tables (`O(p)` words per prime, doc §5.2) are still built and
 //!   dropped one prime at a time, so their peak is `O(max p)` over primes actually used, not
 //!   `O(Σp)`; here `p <= sqrt(max m_k)`, so that peak is `O(sqrt(max m_k))`, not `O(N)`.
 //! * The small-primes sieve itself ([`primes_upto`], up to `sqrt(max m_k)`) is
@@ -77,29 +83,58 @@
 //!   the old per-`k` factor table did; for `mem_bits ∝ sqrt(n)` it's `O(n^{0.75}/log n)`-ish, far
 //!   below the other terms in practice — see the measured table in `docs/nthdigit.md`).
 //!
+//! ## What was actually dominant (found by profiling, not by re-reading the complexity argument)
+//!
+//! Measured peak RSS at `n = 1e7` was 812 MiB before streaming, 447 MiB after streaming (the
+//! caveat this section used to end on: the cofactor `Vec` below). Streaming's own complexity
+//! argument said the *only* remaining `O(N)` piece was `cofactor` — but `cofactor` measures only
+//! tens of MiB at these `n` (see below), nowhere near 447 MiB. Profiling with `--features
+//! mem-profile` (a counting global allocator plus an explicit per-structure breakdown, both in
+//! [`crate::mem_profile`] and [`log_needs_sizes`]) at `n = 1e6`/`3e6` found two real culprits,
+//! **neither of them `cofactor`**:
+//!
+//! 1. **The actual dominant term**, by a wide margin: [`PadicBinom`]'s `memo_s`/`memo_c` were
+//!    memoising across an entire prime's worth of queries instead of within one query's
+//!    recursion tree (a bug, not a documented tradeoff — nothing in doc §5.2's "O(e² p log_p N)
+//!    per query" cost model called for this). For small `p` (where a prime's `klist` is large —
+//!    e.g. `p=3` at `n=1e6` had 34 557 queries), this grew the memo maps to roughly *10x the
+//!    query count* instead of the intended `O(e² log_p N)` per query, measured at ~40 MiB of the
+//!    ~58 MiB peak at `n=1e6` from `p=3` alone. Fixed by [`PadicBinom::clear_query_memo`],
+//!    called before every top-level query in [`padic_consumers`]: cheap (`HashMap::clear` keeps
+//!    the allocation) and correctness-neutral (`s`/`c` are pure functions of their arguments, so
+//!    discarding memo entries only forces recomputation, never changes the answer).
+//! 2. `lucas_small`/`padic_small` themselves, per the `SideRanges` fix described above: measured
+//!    12.9 MiB / 2.4 MiB at `n=1e6`, growing to 36.7 MiB / 6.1 MiB at `n=3e6` before the fix, now
+//!    a fraction of a MiB at both.
+//!
+//! **Result:** peak RSS 67 MiB -> 14 MiB at `n=1e6`; 62 MiB -> 23 MiB at `n=3e6`; 447 MiB (the
+//! streaming-only figure) -> 69 MiB at `n=1e7` (see `docs/nthdigit.md`'s updated table for the
+//! full before/after/after-after numbers). The remaining ~69 MiB at `n=1e7` is now genuinely
+//! dominated by the one piece below, `cofactor`, plus a roughly-comparable amount of transient
+//! `rug::Integer`/rayon/glibc-arena overhead this section doesn't itemise further.
+//!
 //! **What's still not `O(mem_bits)` (doc §7's one remaining honest caveat):** a prime `p` can
 //! divide `m_k` *without* being `<= sqrt(max m_k)` — it's `m_k`'s single larger leftover
 //! cofactor (there's at most one per `k`, `m_k`'s factorisation leaves at most one prime factor
 //! above its square root). When that cofactor is itself `<= t_k`, it still needs Lucas
 //! treatment, but unlike a small sieve prime it's essentially unique to one or two `k` (not
-//! shared by a residue-class arithmetic progression), so it can't be resolved by the same
-//! bounded per-prime iteration. [`stream_needs_and_chunks`] collects these into `cofactor`, a
-//! `Vec` whose size is **not** bounded independent of `N` — measured at roughly 15-40% of `N`
-//! entries (24 bytes each) across the `n = 1e5..1e7` range tested (rises with `n` because larger
-//! `N` relative to `sqrt(max m_k)` gives more room for a `t`-sized cofactor). It's still `O(N)`
-//! words, just a single flat `Vec` of small tuples rather than the old `Vec<Vec<(u64,u32)>>`
-//! factor table plus a full `Vec<Item>` plus multiple `HashMap`s — an order of magnitude smaller
-//! in practice (see the peak-RSS table in `docs/nthdigit.md`), but not asymptotically fixed.
-//! Eliminating it for real would need either an external (disk-backed) sort of the cofactor
-//! needs by target, or a smarter per-prime classification that doesn't require discovering the
-//! cofactor's value before knowing whether it's "small" — both are future work, not implemented
-//! here.
+//! shared by a residue-class arithmetic progression the way a `p <= sqrt(max m_k)` prime is, so
+//! most of its `SideRanges` entries — yes, it's routed through the same machinery as
+//! `lucas_small` now, see [`c_part`] — have exactly one member and don't compact). It can't be
+//! resolved by the same bounded per-prime iteration. [`stream_needs_and_chunks`] collects the
+//! raw needs into `cofactor`, a `Vec` whose size is **not** bounded independent of `N` — measured
+//! at 45 K entries at `n=1e6` (~1.5 MiB) and 133 K entries at `n=3e6` (~6 MiB), 24 bytes each.
+//! It's still `O(N)` words. Eliminating it for real would need either an external (disk-backed)
+//! sort of the cofactor needs by target, or a smarter per-prime classification that doesn't
+//! require discovering the cofactor's value before knowing whether it's "small" — both are
+//! future work, not implemented here. In practice, at the `n` this implementation is run at, it
+//! no longer dominates: see the measured table in `docs/nthdigit.md`.
 //!
 //! **Overall bound achieved:** peak memory is `O(mem_bits log(mem_bits) * threads + pi(sqrt(max
 //! m_k)) + chunks + cofactor_count)` where `chunks = O(N log n / mem_bits)` (tiny: a few thousand
 //! `(u64,u64)` pairs even at `n = 1e7`) and `cofactor_count` is the one term above that scales
-//! with `N` (empirically a fraction of `N`, not all of it, and much cheaper per entry than the
-//! structures it replaced).
+//! with `N` — now, empirically, the dominant *named* term, but itself only tens of MiB through
+//! `n = 1e7` (measured; see `docs/nthdigit.md`).
 
 use crate::nthdigit::{
     self, MAX_N0, extract_digits, frac_fixed_point, mod_inverse, mulmod, powmod, signed,

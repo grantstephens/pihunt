@@ -284,6 +284,26 @@ because Python punishes Theorem 1's word-level loop, which is why §6.1 uses a C
   Eliminating it fully would need an external (disk-backed) sort of these needs by target, or a
   cleverer classification that doesn't require computing the cofactor's value before knowing
   whether it counts as "small"; neither is implemented.
+
+  **Update 2 (2026-09-23, same day, a memory-profiling follow-up): the streaming paragraph above
+  overstated how bounded its own `HashMap`s were.** Measured peak RSS at n=1e7 was still 447 MiB
+  after streaming — nowhere near the tens-of-MiB the "O(pi(sqrt(max m_k)))-bounded maps" claim
+  above implies, and far more than the cofactor `Vec`'s own tens-of-MiB size could explain.
+  Profiling (`--features mem-profile`, a counting global allocator + explicit per-structure
+  sizing — see `src/nthdigit2.rs`'s module docs) at n=1e6/3e6 found two real, distinct bugs:
+  (1) `PadicBinom`'s recursion memo tables (`memo_s`/`memo_c`) were memoising across an entire
+  prime's worth of top-level queries instead of within one query's recursion tree, growing to
+  roughly 10x the query count for small primes — this alone was ~40 of ~58 MiB at n=1e6, by far
+  the single largest contributor found; (2) `lucas_small`/`padic_small` genuinely did cost
+  `O(N loglog sqrt(max m_k))` words (Mertens' third theorem), not `O(pi(sqrt(max m_k)))`, because
+  each `HashMap` key held a `Vec` of *every* matching `(k,t)` pair rather than the compact
+  arithmetic-progression range each key's matches actually form. Both fixed: the p-adic memo is
+  cleared before each top-level query, and the need-lists became `SideRanges` (two `u64`s per
+  key — first/last `t` seen — with consumers regenerating `(k,t)` by walking the range at its
+  known step). Peak RSS at n=1e7: 447 MiB -> 69 MiB. `cofactor` is now, empirically, the
+  dominant *named* remaining term (as this section originally predicted it eventually would be),
+  but at tens of MiB rather than the ~450 the other two bugs were masking it under. See
+  `docs/nthdigit.md`'s Theorem-2 section for the full before/after/now benchmark table.
 * The p-adic tables are O(p) words, and p can reach √(2(M+1)N) *in principle*. In the Rust port,
   p-adic treatment only ever applies to primes `<= sqrt(max m_k)` (a prime above that bound
   divides `m_k` to at most the first power, by construction — see above), so its p-adic tables'

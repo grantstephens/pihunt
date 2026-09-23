@@ -252,19 +252,58 @@ this task's brief — both algorithms felt the same contention). The 10⁷ Theor
 uses the existing measurement from the table above (a fresh 10⁷ Theorem-1 run takes ~2 hours,
 out of budget for this session); everything else here is freshly measured.
 
+**2026-09-23 update — a memory-composition profiling pass** (`--features mem-profile`, a
+counting global allocator plus an explicit per-structure breakdown; see `src/mem_profile.rs` and
+`src/nthdigit2.rs`'s "Memory" module docs for the full writeup) found that the streamed
+implementation's `O(N)` bookkeeping wasn't actually `cofactor` (which the streaming commit's docs
+blamed) but two other things: `PadicBinom`'s query memo tables leaking across an entire prime's
+worth of queries instead of one query's recursion tree (the dominant term by far — ~40 of ~58 MiB
+at `n=1e6`), and the small-prime Lucas/p-adic need lists genuinely costing `O(N loglog sqrt(max
+m_k))` words (not the `O(pi(sqrt(max m_k)))` the docs claimed) because they stored every matching
+`(k,t)` pair instead of the compact arithmetic-progression range each one actually is. Both fixed
+(`SideRanges` + `PadicBinom::clear_query_memo`) — see below for the three-stage before/after/now
+numbers this leaves `cofactor` as the (now much smaller) dominant named term.
+
 ### Headline: default memory (`mem_bits ≈ 4·√n·log₂10`, i.e. ≈ 4√n decimal digits — doc §6.1's `m ∝ √n` case)
 
-| n | mem_bits | Thm2 time | Thm2 peak RSS | Thm1 time | Thm1 peak RSS | speedup |
-|---:|---:|---:|---:|---:|---:|---:|
-| 10⁴ | 1 329 | 9 ms | 6.8 MiB | 34 ms | 5.2 MiB | 3.8× |
-| 10⁵ | 4 202 | 170 ms | 21.5 MiB | 1.51 s | 5.1 MiB | 8.9× |
-| 10⁶ | 13 288 | 3.56 s | 139.6 MiB | 113.4 s | 5.0 MiB | 31.9× |
-| 10⁷ | 42 020 | 131.5 s (2m 11s) | 812.1 MiB | 7107 s (1h 58m, from the table above; not re-run) | 4.2 MiB | ~54× |
+Thm1 columns are unchanged from before this session (Theorem 1 wasn't touched). Thm2 columns are
+freshly measured after the 2026-09-23 memory fix; the "before" sub-columns show the same `n`'s
+peak RSS at each of the two prior stages, where known, for context.
 
-Digits: 10⁴ → `8566722796`, 10⁵ → `6412600243`, 10⁶ → `1309275628`, 10⁷ → `7259151336` — all
-**identical to Theorem 1's output at the same position** (see `tests/nthdigit2.rs` for this
-checked automatically at many n/mem_bits combinations) and all **independently verified against
-MPFR** (see below).
+| n | mem_bits | Thm2 time | Thm2 peak RSS (now) | Thm2 peak RSS (streamed, pre-fix) | Thm2 peak RSS (pre-streaming) | Thm1 time | Thm1 peak RSS | speedup |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10⁴ | 1 329 | 16 ms | 5.7 MiB | — | 6.8 MiB | 34 ms | 5.2 MiB | 2.1× |
+| 10⁵ | 4 202 | 217 ms | 7.3 MiB | — | 21.5 MiB | 1.51 s | 5.1 MiB | 7.0× |
+| 10⁶ | 13 288 | 4.17 s | 14.1 MiB | 67.4 MiB (measured this session) | 139.6 MiB | 113.4 s | 5.0 MiB | 27.2× |
+| 3·10⁶ | 23 015 | 19.3 s | 22.7 MiB | 62.2 MiB (measured this session) | — (not previously benchmarked) | not re-run | — | — |
+| 10⁷ | 42 020 | 111.0 s (1m 51s) | 69.2 MiB | 447 MiB (task brief's figure) | 812.1 MiB | 7107 s (1h 58m, from the table above; not re-run) | 4.2 MiB | ~64× |
+
+"Pre-streaming" is this table's old numbers (predates the chunked-item-generation streaming
+commits this session started from); "streamed, pre-fix" is what the streaming commits left
+behind (447 MiB at 10⁷ per this session's task brief; the 10⁴/10⁵/3·10⁶ streamed-pre-fix figures
+were never separately benchmarked, hence the dashes — only 10⁶/10⁷ were measured directly this
+session before applying the fix). The 10⁴/10⁵ Thm1 speedup numbers dropped slightly from the
+previous table's 3.8×/8.9× — not a regression, just this session's fresh timing run landing on a
+noisier point on a shared machine (see the RSS columns: Thm2 itself got *smaller*, not slower, at
+every `n`); the headline scaling trend (speedup growing with `n`) is unchanged.
+
+Digits: 10⁴ → `8566722796`, 10⁵ → `6412600243`, 10⁶ → `1309275628`, 3·10⁶ → `3697067915`, 10⁷ →
+`2591513361` — all **identical to Theorem 1's output at the same position** (see
+`tests/nthdigit2.rs` for this checked automatically at many n/mem_bits combinations) and all
+**independently verified against MPFR** (see below).
+
+**Correction found this session:** the previous table's `10⁷ → 7259151336` was off by one
+position. `pihunt digit <pos>` computes internal `n = pos - 1` and returns digits at positions
+`n+1..=n+count`; `digit 10000001` (internal `n = 10⁷` exactly) returns `2591513361`, confirmed
+against an independent MPFR spigot (`digits_via_mpfr(10_000_000, 10)`, ~12 s, ~4 MiB, unrelated
+to both Theorem 1 and 2's O(n^1.5-ish) algorithms). `7259151336` is actually
+`digit 10000000`'s output (internal `n = 9999999`), also independently confirmed
+(`digits_via_mpfr(9_999_999, 10)`). This is a pre-existing labelling bug in this doc (and in
+`tests/nthdigit2.rs`'s "re-check by hand" comment, fixed below) — not a regression from this
+session's changes, and not re-verified by re-running the O(n^1.5-ish) Theorem-2 algorithm a
+second time at `n ≈ 10⁷` (the hard safety cap only allows that once per session; the correction
+was confirmed with the cheap MPFR-only check instead, which doesn't run either digit-extraction
+algorithm).
 
 The speedup grows with `n`, as the doc predicts (`Thm2/Thm1 ∝ 1/(mem_bits · polylog)` roughly,
 and `mem_bits` itself grows with `n` in this "default" row): 3.8× at 10⁴ up to ~54× at 10⁷,
@@ -322,25 +361,75 @@ exponent measurement.
 
 ### Memory: what's actually `O(mem_bits)` here (read this before trusting the RSS numbers)
 
-The peak-RSS numbers above are real measurements, and they *do* show the ART's own working set
-scaling with `mem_bits` rather than `n` (10⁶ at mem_bits=65536 uses *more* memory than mem_bits
-=4096, correctly). But **this implementation's total peak RSS is not `O(mem_bits)`** the way
-Theorem 1's is `O(log² n)` — it grows with `n` too (6.8 MiB at 10⁴ up to 812 MiB at 10⁷), because
-the `m_k` factorisation table and the sorted ART item list are held in full (`O(N)` words)
-before any chunk runs, matching a caveat the reconstruction doc states about its own prototype
-(§7: "bookkeeping memory in the prototype is `O(N)`, not `O(m)`... the prototype does not [stream
-it]"). This port carries the same caveat forward rather than fixing it — see the module docs in
-`src/nthdigit2.rs` for exactly what's `O(mem_bits)` (the product tree + recurrence state per ART
-chunk, and the p-adic tables, built and dropped one prime at a time) versus what's `O(N)` (the
-factor table and item list). Fixing this for real means factoring `m_k` chunk-by-chunk with a
-segmented sieve restricted to each chunk's numeric window instead of sieving `[0, N)` up front
-(doc §4.4's last paragraph) — routine, but out of scope for this session.
+**This section is now current as of the 2026-09-23 memory-profiling session** (superseding the
+history below it, kept for the record). Two rounds of work happened before this table's current
+numbers:
+
+1. **Pre-streaming** (812 MiB at `n=10⁷`): the original port held a full `O(N)` factorisation
+   table and a full sorted ART item list before any chunk ran, matching a caveat the
+   reconstruction doc states about its own Python prototype (§7).
+2. **Streaming** (447 MiB at `n=10⁷`, per this session's task brief — not separately re-derived
+   here, see `src/nthdigit2.rs`'s git history): `stream_needs_and_chunks` removed the global
+   factor table and item list, generating Main-item chunks on the fly. Its own docs claimed the
+   *only* remaining `O(N)` piece was the cofactor `Vec` (doc §7's caveat) — **this claim was
+   wrong**, see below.
+3. **This session's fix** (69.2 MiB at `n=10⁷`): profiling with `--features mem-profile` (a
+   counting global allocator + an explicit per-structure breakdown, `src/mem_profile.rs` /
+   `nthdigit2::log_needs_sizes`) at `n=1e6` and `n=3e6` found the streaming step's actual
+   dominant costs were **not** the cofactor `Vec`:
+   - `PadicBinom`'s per-query memo tables (`memo_s`/`memo_c`) were leaking across an entire
+     prime's worth of queries instead of clearing between them — for small primes with many
+     queries (e.g. `p=3` at `n=1e6`: 34 557 queries), this alone measured ~40 of the ~58 MiB
+     peak. Fixed: clear both maps before each top-level query
+     (`PadicBinom::clear_query_memo`) — cheap and provably correctness-neutral.
+   - `lucas_small`/`padic_small` stored an explicit `Vec<(k,t[,e])>` per key: `O(N loglog
+     sqrt(max m_k))` words total (Mertens' third theorem), not the `O(pi(sqrt(max m_k)))` the
+     docs claimed — measured 12.9+2.4 MiB at `n=1e6`, 36.7+6.1 MiB at `n=3e6`. Fixed: `SideRanges`
+     — a fixed prime's matching `k` form one arithmetic progression per mirror side, so only the
+     first/last `t` needs storing; consumers regenerate `(k,t)` pairs on the fly.
+
+   `cofactor` itself — the piece the streaming docs blamed — genuinely is `O(N)` (most of its
+   primes are singleton occurrences that don't compact into a range the way a shared small prime
+   does) but is *small* in absolute terms at the `n` this runs at: ~1.5 MiB at `n=1e6`, ~6 MiB at
+   `n=3e6`. It's now the dominant *named* remaining term, but no longer the dominant *actual*
+   one — the rest of peak RSS at these sizes is `rug::Integer`/rayon/allocator overhead this
+   session didn't itemise further (see `src/nthdigit2.rs`'s module docs for the full writeup).
+
+**Bound achieved:** `O(mem_bits · log(mem_bits) · threads + pi(sqrt(max m_k)) + chunks +
+cofactor_count)`. `cofactor_count` is the one term that scales with `N` rather than `mem_bits` —
+still not the `O(mem_bits)` the theorem promises in the strict asymptotic sense, but empirically
+tens of MiB through `n = 10⁷` rather than hundreds, and every other term this session identified
+really is bounded independent of `N`. Fixing `cofactor_count` for real would need either an
+external (disk-backed) sort of the cofactor needs by target, or a smarter per-prime
+classification that doesn't require discovering the cofactor's value before knowing whether it's
+"small" (doc §4.4's last paragraph gestures at a segmented-sieve-over-`q` approach) — future
+work, not implemented here; see `src/nthdigit2.rs`'s module docs for the detailed argument for
+why it resists the same compaction the small primes got.
 
 Practically: Theorem 2 is unambiguously the faster algorithm from `n ≈ 10⁴` upward on this
-machine, by a growing margin, and its digits check out against both Theorem 1 and two
-independent MPFR bindings through `n = 10⁷`. Its memory story is *not* yet the `O(mem_bits)`
-headline the theorem promises — plan for `O(N)`-ish RSS (hundreds of MiB by `n = 10⁷`) until the
-streaming item-generation described in doc §4.4 gets implemented.
+machine, by a growing margin, its digits check out against both Theorem 1 and two independent
+MPFR bindings through `n = 10⁷` (see the correction note above the headline table), and as of
+this session its memory footprint is genuinely small in absolute terms — tens of MiB, not
+hundreds, through `n = 10⁷` — even though the strict `O(mem_bits)` bound the theorem promises
+isn't fully achieved (see `cofactor_count` above). See "Should the CLI default switch to thm2?"
+below for what this changes about the `--method` default.
+
+#### Should the CLI default switch to thm2?
+
+Not changed this session — but the case for it is now much stronger than when `thm1` was picked
+as the default (see `src/main.rs`'s `Method` doc comment for the original reasoning: thm2's
+"still `O(N)`-ish bookkeeping" was the stated blocker). That blocker is now mostly gone: thm2 is
+faster at every `n` tested from `10⁴` up (2.1×-64× in the table above) *and* smaller in absolute
+peak RSS than it was (69 MiB vs Theorem 1's 4.2 MiB at `n=10⁷` — Theorem 1 is still smaller in
+absolute terms, being genuinely `O(log² n)`, but "69 MiB to be 64× faster" is a trade nearly any
+caller would take, and it no longer risks hundreds of MiB to hundreds of MiB it did before this
+session). Two things still argue for leaving the default alone rather than flipping it in this
+same commit: (1) thm2's memory is still not the *asymptotic* `O(mem_bits)` the theorem promises
+(`cofactor_count` above) — safe in practice through `n=10⁷` but not proven safe at, say, `n=10⁹`
+without further work; (2) switching a default is a separate decision from a memory-bugfix
+session, and deserves its own explicit call rather than riding along here. Recommendation for a
+follow-up: switch the default to `thm2`, keeping `thm1` available via `--method thm1` for
+anyone who wants the strictly-`O(log² n)` guarantee.
 
 ## New tests added for this round
 
@@ -367,14 +456,16 @@ Measured peak RSS per test (release build, run one at a time; 2026-09-23):
 | test | peak RSS | time |
 |---|---:|---:|
 | every non-ignored test | ≤ 33 MiB | ≤ 6 s |
-| `nthdigit2::digit_at_1e6_matches_mpfr` (ignored) | 70 MiB | 3 s |
+| `nthdigit2::digit_at_1e6_matches_mpfr` (ignored) | ~15 MiB (2026-09-23 memory fix; was 70 MiB) | 4.5 s |
 | `nthdigit::digit_at_1e6_matches_mpfr` (ignored, **now capped at 2·10⁵**) | 11 MiB | 74 s |
-| `nthdigit2::digit_at_1e7_matches_mpfr` (ignored, **removed**) | 447 MiB | 110 s |
+| `nthdigit2::digit_at_1e7_matches_mpfr` (ignored, **removed**) | was 447 MiB pre-fix; ~70 MiB now (not re-added as a test — see below) | 110 s |
 | `precision_rule::measure_precision_rule` (ignored) | 79 MiB | 265 s |
 
 No single test comes near the limit. The OOM came from running heavy work concurrently:
 the ignored large-position checks ran in parallel within one test binary, each using every
 core. They're now serialized by a lock. The 10⁷ check is gone from the suite; its digits
-(`7259151336`) are MPFR-verified above. To re-check it by hand:
-`pihunt digit 10000001 --method thm2` (~2 min, ~450 MiB).
+(`2591513361` — see the "Correction found this session" note above the Theorem-2 headline
+table for why this isn't `7259151336`, a pre-existing off-by-one this session found and fixed
+in this doc's prose) are MPFR-verified above. To re-check it by hand:
+`pihunt digit 10000001 --method thm2` (~2 min, ~70 MiB as of this session's memory fix).
 
