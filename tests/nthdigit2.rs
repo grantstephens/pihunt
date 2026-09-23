@@ -119,6 +119,12 @@ fn digit_at_1e6_matches_mpfr() {
     check_large_digit(1_000_000);
 }
 
+#[test]
+#[ignore] // slow: ~2 minutes (see docs/nthdigit.md's benchmark table) + MPFR at ~1e7 digits
+fn digit_at_1e7_matches_mpfr() {
+    check_large_digit(10_000_000);
+}
+
 fn check_large_digit(n: u64) {
     let count = 10usize;
     let got = nthdigit2::digits(n, count, default_mem_bits(n));
