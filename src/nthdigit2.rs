@@ -176,7 +176,11 @@ fn primes_upto(x: u64) -> Vec<u64> {
 
 /// Complete factorisations of `m_k = 2MN + 2k + 1` for every `k < N`, via one segmented sieve
 /// pass over primes `<= sqrt(max m_k)` (doc §5.3: `O(N loglog N)` word ops total). Holds
-/// `O(N)` words (see module docs: this is the un-streamed part).
+/// `O(N)` words: this is the **reference** (non-streaming) construction, kept only for tests
+/// that check the streaming item generation ([`stream_needs_and_chunks`] et al.) produces the
+/// exact same multiset of items as this original approach (see the module docs' history: this
+/// used to be the production path).
+#[cfg(test)]
 fn factor_interval(big_m: u64, big_n: u64) -> Vec<Vec<(u64, u32)>> {
     let base = 2 * big_m * big_n + 1;
     let top = base + 2 * (big_n - 1);
@@ -209,6 +213,191 @@ fn factor_interval(big_m: u64, big_n: u64) -> Vec<Vec<(u64, u32)>> {
         }
     }
     fac
+}
+
+// ---------------------------------------------------------------------------------
+// Streaming factorisation (doc §4.4 last paragraph, doc §7's fix): factor a *window* of `k`
+// values at a time (`O(len)` memory, freed when the window is dropped) instead of the whole
+// `[0, N)` range up front. Same segmented-sieve technique as [`crate::nthdigit::factor_segment`]
+// (residue-class jump per small prime), but keeps exponents (needed to tell Lucas `e==1` from
+// p-adic `e>=2`) and also returns each `k`'s leftover cofactor.
+// ---------------------------------------------------------------------------------
+
+/// For `k` in `[k0, k0+len)`, `m_k = base + 2k`'s prime-power factors `p^e` with `p` in
+/// `small_primes`, plus each `k`'s leftover cofactor (`1`, or a single prime `> max(small_primes)`
+/// — see [`factor_interval`]'s docs for why there's at most one). `O(len)` memory for the
+/// duration of the call; `small_primes` is shared read-only across every window (built once per
+/// [`c_part`] run, `O(pi(sqrt(max m_k)))` words — explicitly within budget, doc §4.4/§7).
+fn factor_window(base: u64, k0: u64, len: u64, small_primes: &[u64]) -> (Vec<u64>, Vec<Vec<(u64, u32)>>) {
+    let len_usize = len as usize;
+    let mut rem: Vec<u64> = (0..len).map(|i| base + 2 * (k0 + i)).collect();
+    let mut fac: Vec<Vec<(u64, u32)>> = vec![Vec::new(); len_usize];
+    for &p in small_primes {
+        if p == 2 {
+            continue; // m_k is always odd
+        }
+        let inv2 = p.div_ceil(2); // inverse of 2 mod odd p, same trick as factor_segment
+        let target_k_mod_p = ((p - base % p) % p) * inv2 % p;
+        let mut i = ((target_k_mod_p + p - k0 % p) % p) as usize;
+        while i < len_usize {
+            let mut e = 0u32;
+            while rem[i].is_multiple_of(p) {
+                rem[i] /= p;
+                e += 1;
+            }
+            if e > 0 {
+                fac[i].push((p, e));
+            }
+            i += p as usize;
+        }
+    }
+    (rem, fac)
+}
+
+/// The `Main` item's modulus for target `t`, given `k`'s small-prime factorisation and leftover
+/// cofactor (doc §4.3: the "large primes" part, `p > t`). `None` if every prime factor is `<= t`
+/// (nothing for the ART to do at this `k` — it's entirely Lucas/p-adic).
+fn main_modulus(t: u64, rem: u64, fac: &[(u64, u32)]) -> Option<u64> {
+    let mut good = 1u64;
+    for &(p, e) in fac {
+        if p > t {
+            good *= p.pow(e);
+        }
+    }
+    if rem > 1 && rem > t {
+        good *= rem;
+    }
+    (good > 1).then_some(good)
+}
+
+/// Every non-`Main` contribution for one `k` (doc §4.3): small-prime Lucas needs (`p <= t`,
+/// `e == 1`), small-prime p-adic needs (`p <= t`, `e >= 2`), and the one-off "cofactor Lucas"
+/// case (leftover cofactor `<= t`) that doc §7 calls out as the part that doesn't fit neatly
+/// into a per-prime arithmetic progression (the cofactor is essentially unique to this `k`, not
+/// shared by a residue class of other `k`s the way a small sieve prime is). Pushed into the
+/// caller's collectors rather than returned, so a hot per-`k` loop doesn't allocate.
+fn classify_extras(
+    t: u64,
+    k: u64,
+    rem: u64,
+    fac: &[(u64, u32)],
+    lucas_small: &mut Vec<(u64, u64, u64, u64)>, // (p, r, k, t)
+    padic_small: &mut Vec<(u64, u64, u64, u32)>, // (p, k, t, e)
+    cofactor: &mut Vec<(u64, u64, u64)>,         // (p, k, t)
+) {
+    for &(p, e) in fac {
+        if p > t {
+            continue;
+        }
+        if e == 1 {
+            lucas_small.push((p, t % p, k, t));
+        } else {
+            padic_small.push((p, k, t, e));
+        }
+    }
+    if rem > 1 && rem <= t {
+        cofactor.push((rem, k, t));
+    }
+}
+
+/// Everything [`c_part`] needs from a single streaming pass over `k in [0, N)` (via `t in [0,
+/// N/2)`, both `k = t` and `k = N-1-t` per doc §4.4's "come out naturally in target order"):
+/// where to cut the Main-item chunks (target windows, `O(N log n / mem_bits)` of them, doc
+/// §5.1), and the small-prime/cofactor Lucas and p-adic needs. Everything here is `O(pi(sqrt(max
+/// m_k)))` or `O(chunks)` sized *except* `cofactor` (doc §7: the one remaining piece whose size
+/// isn't bounded independent of `N` — see the module docs).
+struct StreamNeeds {
+    /// Main-item chunk boundaries, as target windows `[t0, t1)`; [`art_chunk_by_range`]
+    /// regenerates each chunk's items from scratch (cheap re-factoring) rather than this pass
+    /// keeping them around.
+    chunk_bounds: Vec<(u64, u64)>,
+    /// `(p, r) -> [(k, t)]` for small primes (`p <= sqrt(max m_k)`, `e == 1`).
+    lucas_small: HashMap<(u64, u64), Vec<(u64, u64)>>,
+    /// `p -> [(k, t, e)]` for small primes with `e >= 2`.
+    padic_small: HashMap<u64, Vec<(u64, u64, u32)>>,
+    /// `(p, k, t)` triples for the cofactor-Lucas case (doc §7 caveat: `O(fraction * N)`, not
+    /// bounded independent of `N`).
+    cofactor: Vec<(u64, u64, u64)>,
+}
+
+/// Batch size for [`stream_needs_and_chunks`]'s factoring windows: large enough to amortise
+/// per-call overhead, small enough that its `O(batch)` temporary memory never approaches `N`
+/// (it's sized off `sqrt(half)`, not `half` itself).
+fn stream_batch_size(half: u64) -> u64 {
+    ((half as f64).sqrt() as u64).clamp(1024, 1 << 16)
+}
+
+/// The single sequential pass over `t in [0, N/2)` (doc §4.4): factors both `k = t` and `k =
+/// N-1-t` in `O(batch)`-sized windows via [`factor_window`], decides Main-item chunk boundaries
+/// by running bit total (doc's hint: "a cheap first pass counting bits per window without
+/// storing items" — Main items themselves are discarded here, only their bit-length counts),
+/// and collects the small-prime/cofactor Lucas and p-adic needs. Sequential because chunk-cutting
+/// is inherently a running accumulation; factoring itself is a small fraction of total cost
+/// (doc §5.3, and the profiling note in `nthdigit.rs`'s module docs), so this doesn't cost
+/// parallelism where it matters.
+fn stream_needs_and_chunks(base: u64, big_n: u64, small_primes: &[u64], mem_bits: u64) -> StreamNeeds {
+    let half = big_n / 2;
+    let batch = stream_batch_size(half);
+    let mut chunk_bounds = Vec::new();
+    let mut lucas_small: HashMap<(u64, u64), Vec<(u64, u64)>> = HashMap::new();
+    let mut padic_small: HashMap<u64, Vec<(u64, u64, u32)>> = HashMap::new();
+    let mut cofactor = Vec::new();
+    let mut bits_acc = 0u64;
+    let mut chunk_start = 0u64;
+    let mut t0 = 0u64;
+    while t0 < half {
+        let t1 = (t0 + batch).min(half);
+        let len = t1 - t0;
+        let (rem_lo, fac_lo) = factor_window(base, t0, len, small_primes);
+        let (rem_hi, fac_hi) = factor_window(base, big_n - t1, len, small_primes);
+        for t in t0..t1 {
+            let i_lo = (t - t0) as usize;
+            let i_hi = (t1 - 1 - t) as usize;
+            let k_lo = t;
+            let k_hi = big_n - 1 - t;
+
+            classify_extras(
+                t,
+                k_lo,
+                rem_lo[i_lo],
+                &fac_lo[i_lo],
+                &mut lucas_small,
+                &mut padic_small,
+                &mut cofactor,
+            );
+            if let Some(q) = main_modulus(t, rem_lo[i_lo], &fac_lo[i_lo]) {
+                bits_acc += 64 - q.leading_zeros() as u64;
+            }
+            classify_extras(
+                t,
+                k_hi,
+                rem_hi[i_hi],
+                &fac_hi[i_hi],
+                &mut lucas_small,
+                &mut padic_small,
+                &mut cofactor,
+            );
+            if let Some(q) = main_modulus(t, rem_hi[i_hi], &fac_hi[i_hi]) {
+                bits_acc += 64 - q.leading_zeros() as u64;
+            }
+
+            if bits_acc >= mem_bits {
+                chunk_bounds.push((chunk_start, t + 1));
+                chunk_start = t + 1;
+                bits_acc = 0;
+            }
+        }
+        t0 = t1;
+    }
+    if chunk_start < half {
+        chunk_bounds.push((chunk_start, half));
+    }
+    StreamNeeds {
+        chunk_bounds,
+        lucas_small,
+        padic_small,
+        cofactor,
+    }
 }
 
 // ---------------------------------------------------------------------------------
