@@ -142,7 +142,7 @@ fn exact_division_and_small_helpers() {
     assert_eq!(x.div_u64_exact(12345), Big::pow_u64(10, 30));
     assert_eq!(Big::pow_u64(10, 3).to_u64(), Some(1000));
     assert_eq!(Big::binomial(10, 3).to_u64(), Some(120));
-    assert_eq!(Big::binomial(100_000_000, 4).to_decimal_string(), "416666641666667083333325000000");
+    assert_eq!(Big::binomial(100_000_000, 4).to_decimal_string(), "4166666416666671249999975000000");
     assert_eq!(Big::pow_u64(2, 70).to_decimal_string(), "1180591620717411303424");
     assert!(Big::zero().is_zero());
     assert_eq!(Big::one().mul_u64(7), Big::from_u64(7));
