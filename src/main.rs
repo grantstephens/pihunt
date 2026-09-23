@@ -257,6 +257,15 @@ fn digit_cmd(pos: u64, count: usize) -> Result<ExitCode, String> {
         Some(kb) => eprintln!("digit {pos} (+{count}): {ms} ms, peak RSS {kb} KiB"),
         None => eprintln!("digit {pos} (+{count}): {ms} ms"),
     }
+    #[cfg(feature = "nthdigit-profile")]
+    {
+        let (factor_ns, loop_ns) = pihunt::nthdigit::profile_totals_ns();
+        eprintln!(
+            "  [profile] factor_segment: {:.1} ms (summed across threads), binomial loop: {:.1} ms",
+            factor_ns as f64 / 1e6,
+            loop_ns as f64 / 1e6
+        );
+    }
     println!("{s}");
     Ok(ExitCode::SUCCESS)
 }
