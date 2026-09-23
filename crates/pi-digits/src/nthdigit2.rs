@@ -137,10 +137,10 @@
 //! with `N` — now, empirically, the dominant *named* term, but itself only tens of MiB through
 //! `n = 1e7` (measured; see `docs/nthdigit.md`).
 
+use crate::bignum::Big;
 use crate::nthdigit::{
     self, MAX_N0, extract_digits, frac_fixed_point, mod_inverse, mulmod, powmod, signed,
 };
-use rug::Integer;
 use std::collections::HashMap;
 
 /// Cache of Lucas' theorem's per-digit binomial row + prefix sums, keyed `(prime, digit
@@ -537,47 +537,47 @@ fn stream_needs_and_chunks(
 /// and composed via `(a1*a2, d1*d2, d2*t1 + t2*a1)` (standard binary-splitting composition).
 const LEAF: u64 = 24;
 
-fn bs(big_n: u64, j1: u64, j2: u64) -> (Integer, Integer, Integer) {
+fn bs(big_n: u64, j1: u64, j2: u64) -> (Big, Big, Big) {
     if j2 - j1 <= LEAF {
-        let (mut a, mut d, mut t) = (Integer::from(1), Integer::from(1), Integer::from(0));
+        let (mut a, mut d, mut t) = (Big::one(), Big::one(), Big::zero());
         for j in (j1 + 1)..=j2 {
             let u = big_n - j + 1;
-            t = j * t + u * &a;
-            a *= u;
-            d *= j;
+            t = t.mul_u64(j).add(&a.mul_u64(u));
+            a = a.mul_u64(u);
+            d = d.mul_u64(j);
         }
         return (a, d, t);
     }
     let mid = (j1 + j2) >> 1;
     let (a1, d1, t1) = bs(big_n, j1, mid);
     let (a2, d2, t2) = bs(big_n, mid, j2);
-    let tau = Integer::from(&d2 * &t1) + Integer::from(&t2 * &a1);
-    (a1 * a2, d1 * d2, tau)
+    let tau = d2.mul(&t1).add(&t2.mul(&a1));
+    (a1.mul(&a2), d1.mul(&d2), tau)
 }
 
 /// Applies steps `(j1, j2]` to `state` modulo `Q`, in groups sized so each group's binary
 /// splitting stays close to `bits(Q)` bits (doc §4.4 step 2/3: "groups of `g = m/log2 N`").
 fn advance(
     big_n: u64,
-    state: (Integer, Integer, Integer),
+    state: (Big, Big, Big),
     j1: u64,
     j2: u64,
-    q: &Integer,
+    q: &Big,
     lg_n: u32,
-) -> (Integer, Integer, Integer) {
+) -> (Big, Big, Big) {
     if j2 <= j1 {
         return state;
     }
-    let qb = q.significant_bits().max(64) as u64;
+    let qb = q.bits().max(64);
     let g = (qb / lg_n as u64).max(8);
     let (mut p, mut t, mut d) = state;
     let mut j = j1;
     while j < j2 {
         let e = (j + g).min(j2);
         let (a, dd, tt) = bs(big_n, j, e);
-        let new_p = Integer::from(&a * &p) % q;
-        let new_t = (Integer::from(&dd * &t) + Integer::from(&tt * &p)) % q;
-        let new_d = Integer::from(&dd * &d) % q;
+        let new_p = a.mul(&p).rem(q);
+        let new_t = dd.mul(&t).add(&tt.mul(&p)).rem(q);
+        let new_d = dd.mul(&d).rem(q);
         p = new_p;
         t = new_t;
         d = new_d;
@@ -840,8 +840,9 @@ impl PadicBinom {
                 if k < i as u64 {
                     break;
                 }
-                let coef = Integer::from(k).binomial(i) * Integer::from(self.pow_p[i as usize]);
-                let coef_mod = Integer::from(&coef % modulus).to_u64().unwrap();
+                let coef_mod = Big::binomial(k, i)
+                    .mul_u64(self.pow_p[i as usize])
+                    .rem_u64(modulus);
                 if coef_mod == 0 {
                     continue;
                 }
@@ -891,8 +892,9 @@ impl PadicBinom {
                 if k < i as u64 {
                     break;
                 }
-                let coef = Integer::from(k).binomial(i) * Integer::from(self.pow_p[i as usize]);
-                let coef_mod = Integer::from(&coef % modulus).to_u64().unwrap();
+                let coef_mod = Big::binomial(k, i)
+                    .mul_u64(self.pow_p[i as usize])
+                    .rem_u64(modulus);
                 if coef_mod == 0 {
                     continue;
                 }
@@ -964,29 +966,24 @@ fn art_chunk(
     lg_n: u32,
 ) -> (u128, u64, Vec<LucasLeaf>) {
     let l = items.len();
-    let mut tree: HashMap<(usize, usize), Integer> = HashMap::new();
+    let mut tree: HashMap<(usize, usize), Big> = HashMap::new();
 
-    fn build(
-        lo: usize,
-        hi: usize,
-        items: &[Item],
-        tree: &mut HashMap<(usize, usize), Integer>,
-    ) -> Integer {
+    fn build(lo: usize, hi: usize, items: &[Item], tree: &mut HashMap<(usize, usize), Big>) -> Big {
         if hi - lo == 1 {
-            let v = Integer::from(items[lo].q);
+            let v = Big::from_u64(items[lo].q);
             tree.insert((lo, hi), v.clone());
             return v;
         }
         let mid = (lo + hi) / 2;
         let l = build(lo, mid, items, tree);
         let r = build(mid, hi, items, tree);
-        let prod = Integer::from(&l * &r);
+        let prod = l.mul(&r);
         tree.insert((lo, hi), prod.clone());
         prod
     }
 
     let q_total = build(0, l, items, &mut tree);
-    let one = (Integer::from(1), Integer::from(1), Integer::from(1));
+    let one = (Big::one(), Big::one(), Big::one());
     let x0 = advance(big_n, one, 0, items[0].t, &q_total, lg_n);
 
     #[allow(clippy::too_many_arguments)]
@@ -996,9 +993,9 @@ fn art_chunk(
         base: u64,
         lo: usize,
         hi: usize,
-        x: (Integer, Integer, Integer),
+        x: (Big, Big, Big),
         items: &[Item],
-        tree: &HashMap<(usize, usize), Integer>,
+        tree: &HashMap<(usize, usize), Big>,
         lg_n: u32,
         acc: &mut u128,
         terms: &mut u64,
@@ -1006,10 +1003,10 @@ fn art_chunk(
     ) {
         if hi - lo == 1 {
             let it = &items[lo];
-            let q_big = Integer::from(it.q);
-            let pm = Integer::from(&x.0 % &q_big).to_u64().unwrap();
-            let tm = Integer::from(&x.1 % &q_big).to_u64().unwrap();
-            let dm = Integer::from(&x.2 % &q_big).to_u64().unwrap();
+            let q_big = Big::from_u64(it.q);
+            let pm = x.0.rem(&q_big).to_u64().unwrap();
+            let tm = x.1.rem(&q_big).to_u64().unwrap();
+            let dm = x.2.rem(&q_big).to_u64().unwrap();
             match it.tag {
                 Tag::Main(k) => {
                     let dinv = mod_inverse(dm, it.q);
@@ -1029,19 +1026,11 @@ fn art_chunk(
         let mid = (lo + hi) / 2;
         let ql = tree.get(&(lo, mid)).unwrap();
         let qr = tree.get(&(mid, hi)).unwrap();
-        let xl = (
-            Integer::from(&x.0 % ql),
-            Integer::from(&x.1 % ql),
-            Integer::from(&x.2 % ql),
-        );
+        let xl = (x.0.rem(ql), x.1.rem(ql), x.2.rem(ql));
         rec(
             n, big_n, base, lo, mid, xl, items, tree, lg_n, acc, terms, lucas_out,
         );
-        let xr0 = (
-            Integer::from(&x.0 % qr),
-            Integer::from(&x.1 % qr),
-            Integer::from(&x.2 % qr),
-        );
+        let xr0 = (x.0.rem(qr), x.1.rem(qr), x.2.rem(qr));
         let xr = advance(big_n, xr0, items[lo].t, items[mid].t, qr, lg_n);
         rec(
             n, big_n, base, mid, hi, xr, items, tree, lg_n, acc, terms, lucas_out,
@@ -1457,6 +1446,7 @@ pub fn digits(n: u64, count: usize, mem_bits: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rug::Integer;
     use rug::ops::Pow;
 
     #[test]
@@ -1524,7 +1514,7 @@ mod tests {
             // T_t=delta+tau (see module test docs / the derivation in the PR).
             let p_t = alpha;
             let d_t = delta;
-            let t_t = Integer::from(&d_t + &tau);
+            let t_t = d_t.add(&tau);
 
             let p_exact = {
                 let mut prod = Integer::from(1);
@@ -1542,9 +1532,21 @@ mod tests {
             };
             let t_exact = Integer::from(&d_exact * &s_k_exact(big_n, t));
 
-            assert_eq!(p_t, p_exact, "N={big_n} t={t}: P_t mismatch");
-            assert_eq!(d_t, d_exact, "N={big_n} t={t}: D_t mismatch");
-            assert_eq!(t_t, t_exact, "N={big_n} t={t}: T_t mismatch");
+            assert_eq!(
+                p_t.to_decimal_string(),
+                p_exact.to_string(),
+                "N={big_n} t={t}: P_t mismatch"
+            );
+            assert_eq!(
+                d_t.to_decimal_string(),
+                d_exact.to_string(),
+                "N={big_n} t={t}: D_t mismatch"
+            );
+            assert_eq!(
+                t_t.to_decimal_string(),
+                t_exact.to_string(),
+                "N={big_n} t={t}: T_t mismatch"
+            );
         }
     }
 
@@ -1556,13 +1558,10 @@ mod tests {
             (200, 10, 150, 9973),
             (500, 0, 500, 10_007),
         ] {
-            let qi = Integer::from(q);
-            let start = (
-                Integer::from(1) % &qi,
-                Integer::from(1) % &qi,
-                Integer::from(1) % &qi,
-            );
-            let (p, t, d) = advance(big_n, start, j1, j2, &qi, lg_n);
+            let qb = Big::from_u64(q);
+            let one_mod_q = Big::one().rem(&qb);
+            let start = (one_mod_q.clone(), one_mod_q.clone(), one_mod_q);
+            let (p, t, d) = advance(big_n, start, j1, j2, &qb, lg_n);
 
             // direct step-by-step reference, reduced mod q at every step
             let (mut pr, mut tr, mut dr) = (1u64 % q, 1u64 % q, 1u64 % q);

@@ -789,15 +789,12 @@ pub(crate) fn extract_digits(mut x: u128, count: usize) -> String {
 /// plus one ulp of fixed-point rounding for each of the `terms` accumulated fractions
 /// (each is floored once, then added or subtracted exactly).
 pub(crate) fn error_units(n0: u32, terms: u64) -> u128 {
-    let num = Integer::from(1) << 128u32;
-    let den = Integer::from(10).pow(n0);
-    let mut q = Integer::from(&num / &den);
-    let rem = Integer::from(&num - &q * &den);
-    if rem > 0 {
-        q += 1;
-    }
-    q += terms;
-    q.to_u128().unwrap_or(u128::MAX)
+    assert!(
+        (1..=38).contains(&n0),
+        "n0 out of the u128-certifiable range"
+    );
+    let d = 10u128.pow(n0);
+    (u128::MAX / d + 1).saturating_add(terms as u128)
 }
 
 /// Largest `n0` worth attempting: rounding costs up to one ulp (2^-128) per term, and there
@@ -880,6 +877,18 @@ mod tests {
         assert_eq!(error_units(20, 1_000), base + 1_000);
         // At n0 = 30 the truncation bound is below what 10^10 rounded terms can promise.
         assert!(error_units(30, 10_000_000_000) > 2 * error_units(30, 0));
+
+        // Cross-check the u128-only computation against the old rug-based one, done inline
+        // here with rug as a reference (rug stays a dev-dependency for exactly this purpose).
+        let num = Integer::from(1) << 128u32;
+        let den = Integer::from(10).pow(20u32);
+        let mut q = Integer::from(&num / &den);
+        let rem = Integer::from(&num - &q * &den);
+        if rem > 0 {
+            q += 1;
+        }
+        let rug_base: u128 = q.to_u128().unwrap();
+        assert_eq!(base, rug_base, "error_units(20, 0) vs rug computation");
     }
 
     /// A tiny xorshift64 PRNG (deterministic, no external `rand` dependency), mirroring the
