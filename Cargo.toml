@@ -3,6 +3,11 @@ name = "pihunt"
 version = "0.2.0"
 edition = "2024"
 
+[features]
+# Temporary, throwaway profiling instrumentation for src/nthdigit.rs's C-sum (factoring
+# time vs binomial-loop time). Not meant to ship enabled; see docs/nthdigit.md.
+nthdigit-profile = []
+
 [dependencies]
 blake3 = "1.8.7"
 clap = { version = "4.6.7", features = ["derive"] }
