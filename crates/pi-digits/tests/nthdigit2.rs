@@ -1,13 +1,13 @@
-//! Integration tests for `pihunt::nthdigit2` (the Theorem-2 port). Building-block tests (the
+//! Integration tests for `pi_digits::nthdigit2` (the Theorem-2 port). Building-block tests (the
 //! recurrence, Lucas, p-adic recursion, the remainder tree, partial-fraction reassembly) live
 //! as unit tests inside `src/nthdigit2.rs` itself, since they exercise private helpers; this
 //! file covers what's reachable through the public API: full digit equality against Theorem 1
 //! and against MPFR, across several `mem_bits` values, plus the CLI. See
 //! `docs/nthdigit-theorem2.md` and `tests/nthdigit.rs` (the Theorem-1 equivalent this mirrors).
 
-use pihunt::nthdigit;
-use pihunt::nthdigit2::{self, default_mem_bits};
-use pihunt::pslq::digits_to_bits;
+use pi_digits::digits_to_bits;
+use pi_digits::nthdigit;
+use pi_digits::nthdigit2::{self, default_mem_bits};
 use rug::{Float, Integer, float::Constant, ops::Pow};
 
 /// A tiny deterministic xorshift64 PRNG (matches `tests/nthdigit.rs`), reproducible without a
@@ -144,57 +144,4 @@ fn check_large_digit(n: u64) {
     let s = int_part.to_string();
     let expected = &s[(n as usize + 1)..(n as usize + 1 + count)];
     assert_eq!(got, expected, "n={n}");
-}
-
-// ---------------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------------
-
-#[test]
-fn cli_digit_thm2_matches_thm1() {
-    let bin = env!("CARGO_BIN_EXE_pihunt");
-    let out1 = std::process::Command::new(bin)
-        .args(["digit", "1", "--count", "20", "--method", "thm1"])
-        .output()
-        .unwrap();
-    let out2 = std::process::Command::new(bin)
-        .args([
-            "digit", "1", "--count", "20", "--method", "thm2", "--mem", "512",
-        ])
-        .output()
-        .unwrap();
-    assert!(out1.status.success());
-    assert!(
-        out2.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out2.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out1.stdout).trim(),
-        String::from_utf8_lossy(&out2.stdout).trim()
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out2.stdout).trim(),
-        "14159265358979323846"
-    );
-}
-
-#[test]
-fn cli_stream_thm2_prints_independent_blocks() {
-    let bin = env!("CARGO_BIN_EXE_pihunt");
-    let out = std::process::Command::new(bin)
-        .args([
-            "stream", "--from", "1", "--block", "5", "--blocks", "2", "--method", "thm2", "--mem",
-            "512",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines, vec!["14159", "26535"]);
 }

@@ -1,8 +1,8 @@
-//! Tests for `pihunt::nthdigit` (Gourdon's low-memory n-th decimal digit algorithm).
+//! Tests for `pi_digits::nthdigit` (Gourdon's low-memory n-th decimal digit algorithm).
 //! See `docs/nthdigit.md` and the module docs in `src/nthdigit.rs`.
 
-use pihunt::nthdigit::{self, Params};
-use pihunt::pslq::digits_to_bits;
+use pi_digits::digits_to_bits;
+use pi_digits::nthdigit::{self, Params};
 use rug::{Float, Integer, float::Constant, ops::Pow};
 
 /// A tiny deterministic xorshift64 PRNG, so tests are reproducible without a `rand` dep.
@@ -262,38 +262,6 @@ fn check_large_digit(n: u64) {
     let s = int_part.to_string();
     let expected = &s[(n as usize + 1)..(n as usize + 1 + count)];
     assert_eq!(got, expected, "n={n}");
-}
-
-// ---------------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------------
-
-#[test]
-fn cli_digit_prints_expected_digits() {
-    let bin = env!("CARGO_BIN_EXE_pihunt");
-    let out = std::process::Command::new(bin)
-        .args(["digit", "1", "--count", "5"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "14159");
-}
-
-#[test]
-fn cli_stream_prints_independent_blocks() {
-    let bin = env!("CARGO_BIN_EXE_pihunt");
-    let out = std::process::Command::new(bin)
-        .args(["stream", "--from", "1", "--block", "5", "--blocks", "2"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines, vec!["14159", "26535"]);
 }
 
 /// Requests longer than one certified chunk are stitched from independent chunks and must

@@ -1866,7 +1866,7 @@ mod tests {
 
     #[test]
     fn frac_10n_pi_m_matches_theorem1_and_mpfr() {
-        use crate::pslq::digits_to_bits;
+        use crate::digits_to_bits;
         use rug::{Float, float::Constant};
 
         for &n in &[2500u64, 5000, 20_000] {

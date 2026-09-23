@@ -860,7 +860,7 @@ pub fn digits(n: u64, count: usize) -> String {
 pub(crate) fn digits_via_mpfr(n: u64, count: usize) -> String {
     let guard: u64 = 20;
     let total = n + count as u64 + guard;
-    let bits = crate::pslq::digits_to_bits(total as u32) + 8;
+    let bits = crate::digits_to_bits(total as u32) + 8;
     let pi = Float::with_val(bits, Constant::Pi);
     let scale = Float::with_val(bits, Integer::from(10).pow(total as u32));
     let scaled = Float::with_val(bits, &pi * &scale);

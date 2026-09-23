@@ -1,17 +1,21 @@
+[workspace]
+members = [".", "crates/pi-digits"]
+resolver = "3"
+
 [package]
 name = "pihunt"
 version = "0.2.0"
 edition = "2024"
 
 [features]
-# Temporary, throwaway profiling instrumentation for src/nthdigit.rs's C-sum (factoring
+# Temporary, throwaway profiling instrumentation for pi-digits's nthdigit.rs C-sum (factoring
 # time vs binomial-loop time). Not meant to ship enabled; see docs/nthdigit.md.
-nthdigit-profile = []
+nthdigit-profile = ["pi-digits/nthdigit-profile"]
 # Heap-accounting instrumentation for nthdigit2's memory-composition investigation (see
-# src/mem_profile.rs and the "Memory" section of src/nthdigit2.rs's module docs). Installs a
-# counting global allocator and prints live/peak checkpoints from c_part to stderr. Zero-cost
-# (no global allocator override, checkpoint calls compile to nothing) when disabled.
-mem-profile = []
+# crates/pi-digits/src/mem_profile.rs and the "Memory" section of nthdigit2.rs's module docs).
+# Installs a counting global allocator and prints live/peak checkpoints from c_part to stderr.
+# Zero-cost (no global allocator override, checkpoint calls compile to nothing) when disabled.
+mem-profile = ["pi-digits/mem-profile"]
 
 [dependencies]
 blake3 = "1.8.7"
@@ -19,6 +23,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 # Link the system GMP/MPFR instead of building them from source.
 gmp-mpfr-sys = { version = "1.7.1", features = ["use-system-libs"] }
 jiff = "0.2.37"
+pi-digits = { path = "crates/pi-digits" }
 rayon = "1.12.0"
 rug = "1.30.0"
 serde = { version = "1.0.229", features = ["derive"] }
