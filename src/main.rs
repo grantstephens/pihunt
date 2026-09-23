@@ -41,6 +41,24 @@ enum Cmd {
         #[arg(required = true)]
         results: Vec<PathBuf>,
     },
+    /// Print `count` decimal digits of pi starting at position `pos` (1-based; position 1
+    /// is the '1' in 3.14159...).
+    Digit {
+        pos: u64,
+        #[arg(long, default_value_t = 10)]
+        count: usize,
+    },
+    /// Stream decimal digits of pi forever, in independently-computed blocks (memory never
+    /// grows), printing each block to stdout as soon as it's ready.
+    Stream {
+        #[arg(long, default_value_t = 1)]
+        from: u64,
+        #[arg(long, default_value_t = 10)]
+        block: usize,
+        /// Stop after this many blocks. Hidden: for tests only.
+        #[arg(long, hide = true)]
+        blocks: Option<u64>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -49,6 +67,12 @@ fn main() -> ExitCode {
         Cmd::Plan { batch, shard } => show_plan(batch, shard),
         Cmd::Verify { results } => reverify(results),
         Cmd::Report { results } => write_report(results),
+        Cmd::Digit { pos, count } => digit_cmd(pos, count),
+        Cmd::Stream {
+            from,
+            block,
+            blocks,
+        } => stream_cmd(from, block, blocks),
     };
     result.unwrap_or_else(|e| {
         eprintln!("error: {e}");
@@ -206,6 +230,65 @@ fn reverify(path: PathBuf) -> Result<ExitCode, String> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// Peak resident set size in KiB, read from `/proc/self/status` (`VmHWM`). `None` if the
+/// file can't be read or parsed (e.g. non-Linux) — we don't want a missing metric to fail
+/// the digit computation itself.
+fn peak_rss_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("VmHWM:")?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    })
+}
+
+fn digit_cmd(pos: u64, count: usize) -> Result<ExitCode, String> {
+    if pos == 0 {
+        return Err("position is 1-based; use pos >= 1".to_string());
+    }
+    let start = std::time::Instant::now();
+    let s = pihunt::nthdigit::digits(pos - 1, count);
+    let ms = start.elapsed().as_millis();
+    match peak_rss_kb() {
+        Some(kb) => eprintln!("digit {pos} (+{count}): {ms} ms, peak RSS {kb} KiB"),
+        None => eprintln!("digit {pos} (+{count}): {ms} ms"),
+    }
+    println!("{s}");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn stream_cmd(from: u64, block: usize, blocks: Option<u64>) -> Result<ExitCode, String> {
+    use std::io::Write;
+    if from == 0 {
+        return Err("position is 1-based; use --from >= 1".to_string());
+    }
+    if block == 0 {
+        return Err("--block must be >= 1".to_string());
+    }
+    let mut pos = from;
+    let mut done = 0u64;
+    loop {
+        let start = std::time::Instant::now();
+        let s = pihunt::nthdigit::digits(pos - 1, block);
+        println!("{s}");
+        std::io::stdout().flush().map_err(|e| e.to_string())?;
+        let ms = start.elapsed().as_millis();
+        let end = pos + block as u64 - 1;
+        match peak_rss_kb() {
+            Some(kb) => eprintln!("[block {done}] pos {pos}..{end} ({ms} ms, peak RSS {kb} KiB)"),
+            None => eprintln!("[block {done}] pos {pos}..{end} ({ms} ms)"),
+        }
+        pos += block as u64;
+        done += 1;
+        if blocks.is_some_and(|limit| done >= limit) {
+            break;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn summarise(records: &[Record]) {
