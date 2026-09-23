@@ -113,3 +113,110 @@ scales with `n`.
 - n = 10⁷: digits `7259151336` — **verified** afterwards against MPFR (gmpy2 `const_pi` at 3.3·10⁷ bits, 10 s), positions 10⁷…10⁷+9.
 - n = 1, 762 (Feynman point), and everywhere in `[0, 20000)` (200 sequential + 200 random positions): checked in `digits_match_mpfr_reference`, part of the default `cargo test` run.
 - `digit 1 --count 5` → `14159` and `digit 762 --count 8` → `99999983` were additionally cross-checked against an independent from-scratch Python (`decimal`/Machin and `decimal`/Chudnovsky) π computation before any automated test was written, and n = 2000/10000 against a from-scratch Chudnovsky reference — see the commit message for `src/nthdigit.rs`.
+
+## Theorem 2 (Rust)
+
+**Status: implemented, benchmarked, verified against MPFR through 10⁷.** `src/nthdigit2.rs`
+ports the reconstruction in `docs/nthdigit-theorem2.md` (the chunked accumulating remainder
+tree / binary-splitting algorithm, `research/thm2/thm2.py`'s Python+gmpy2 prototype) to
+production Rust with `rug::Integer` + `rayon`. `pihunt digit <n> --method thm2 --mem <bits>`
+(or `--method thm1`, the default — see `src/main.rs`'s `Method` doc comment for why thm1 stays
+the default despite losing on speed).
+
+All timings below: same machine as the Theorem-1 table above (Ryzen 7 5700G, 6 cores),
+`cargo build --release`, wall time and peak RSS (`VmHWM`) from the CLI's own instrumentation.
+Theorem 1's 10⁴/10⁵/10⁶ rows were **re-run back-to-back** with Theorem 2 in this session for a
+fair comparison (the machine was shared with another agent's benchmarking run throughout, per
+this task's brief — both algorithms felt the same contention). The 10⁷ Theorem-1 comparison
+uses the existing measurement from the table above (a fresh 10⁷ Theorem-1 run takes ~2 hours,
+out of budget for this session); everything else here is freshly measured.
+
+### Headline: default memory (`mem_bits ≈ 4·√n·log₂10`, i.e. ≈ 4√n decimal digits — doc §6.1's `m ∝ √n` case)
+
+| n | mem_bits | Thm2 time | Thm2 peak RSS | Thm1 time | Thm1 peak RSS | speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10⁴ | 1 329 | 9 ms | 6.8 MiB | 34 ms | 5.2 MiB | 3.8× |
+| 10⁵ | 4 202 | 170 ms | 21.5 MiB | 1.51 s | 5.1 MiB | 8.9× |
+| 10⁶ | 13 288 | 3.56 s | 139.6 MiB | 113.4 s | 5.0 MiB | 31.9× |
+| 10⁷ | 42 020 | 131.5 s (2m 11s) | 812.1 MiB | 7107 s (1h 58m, from the table above; not re-run) | 4.2 MiB | ~54× |
+
+Digits: 10⁴ → `8566722796`, 10⁵ → `6412600243`, 10⁶ → `1309275628`, 10⁷ → `7259151336` — all
+**identical to Theorem 1's output at the same position** (see `tests/nthdigit2.rs` for this
+checked automatically at many n/mem_bits combinations) and all **independently verified against
+MPFR** (see below).
+
+The speedup grows with `n`, as the doc predicts (`Thm2/Thm1 ∝ 1/(mem_bits · polylog)` roughly,
+and `mem_bits` itself grows with `n` in this "default" row): 3.8× at 10⁴ up to ~54× at 10⁷,
+close to the reconstruction doc's own Python-prototype-vs-C-Theorem-1 ratios in §6.1 (0.4× at
+10⁴ rising to 9.6× at 1.28·10⁶) but *larger* here, because a native Rust ART leaf costs far less
+than a Python one relative to Theorem 1's now-also-native inner loop — exactly the "should be
+much faster per leaf" the doc's §7 caveats anticipated.
+
+### Other `mem_bits` values (doc §6.2's fixed-n, varying-m experiment)
+
+| n | mem_bits | Thm2 time | Thm2 peak RSS |
+|---:|---:|---:|---:|
+| 10⁴ | 256 (tiny) | 14 ms | 6.3 MiB |
+| 10⁴ | 1 329 (default) | 9 ms | 6.8 MiB |
+| 10⁴ | 8 192 (large) | 16 ms | 8.0 MiB |
+| 10⁵ | 1 024 (small) | 346 ms | 18.9 MiB |
+| 10⁵ | 4 202 (default) | 170 ms | 21.5 MiB |
+| 10⁵ | 16 384 (large) | 149 ms | 26.3 MiB |
+| 10⁶ | 4 096 (small) | 8.46 s | 116.0 MiB |
+| 10⁶ | 13 288 (default) | 3.56 s | 139.6 MiB |
+| 10⁶ | 65 536 (large) | 2.78 s | 181.4 MiB |
+
+Same qualitative shape as the prototype's §6.2 table: going from a small to a default `mem_bits`
+helps a lot (ART cost drops close to the predicted `1/m`), but pushing well past `4√n` gives
+diminishing returns (the ART stops being the bottleneck; the `O(N)`-ish bookkeeping this
+implementation doesn't stream — see below — and the p-adic/Lucas passes start to dominate, just
+as the doc says). At 10⁴ mem_bits barely matters at all: the whole computation is small enough
+that fixed overheads (thread pool spin-up, the `O(N)` factor sieve) swamp the ART's own cost in
+either direction.
+
+### Scaling exponent vs the n^1.5·polylog prediction
+
+Least-squares log-log slope across the four "headline" n values above (10⁴, 10⁵, 10⁶, 10⁷,
+`mem_bits ∝ √n`): **Theorem 2 ≈ 1.38**, matching the reconstruction doc's own measured range
+(1.26–1.43 across its various counters, §6.1) and consistent with the predicted local slope of
+`n^1.5/log²(n/m)` (≈1.4-1.5 over this range, since the `log²(n/m)` denominator grows slowly and
+eats a bit of the naive 1.5 exponent). Theorem 1 over the same three re-run points (10⁴–10⁶)
+comes out at **≈1.76** here, close to its historical `n²·loglog n/log²n` slope (~1.8, both in
+this doc's own earlier table and the reconstruction doc's C-baseline measurement). Four points
+is a thin fit — this is a sanity check that the scaling is in the right ballpark, not a precise
+exponent measurement.
+
+### MPFR verification
+
+- n = 10⁵, 10⁶: `cargo test --release --test nthdigit2 -- --ignored` — **passes**, `6412600243`
+  / `1309275628`, checked against `rug`/MPFR the same way as the Theorem-1 table above.
+- n = 10⁶, 10⁷: independently cross-checked with **gmpy2** (not `rug`/MPFR — a different library
+  binding, in `research/thm2`'s own venv) via `gmpy2.const_pi()` at precision `⌈(pos+30)·log₂10⌉
+  + 16` bits and slicing its `gmpy2.digits(pi, 10)` mantissa string at `[pos:pos+10]`: both match
+  exactly (`1309275628`, `7259151336`), 0.7 s and 11.8 s respectively to compute the reference.
+- n = 10⁴, and every position `tests/nthdigit2.rs::digits_match_mpfr_reference_across_mem_bits`
+  and `digits_match_theorem1_across_positions_and_mem_bits` cover (positions 0..2000 by steps of
+  37, the Feynman point, ~100 random positions up to 20000, and ~45 random positions up to
+  ~42000 across three `mem_bits` regimes) — part of the default `cargo test` run, all green.
+
+### Memory: what's actually `O(mem_bits)` here (read this before trusting the RSS numbers)
+
+The peak-RSS numbers above are real measurements, and they *do* show the ART's own working set
+scaling with `mem_bits` rather than `n` (10⁶ at mem_bits=65536 uses *more* memory than mem_bits
+=4096, correctly). But **this implementation's total peak RSS is not `O(mem_bits)`** the way
+Theorem 1's is `O(log² n)` — it grows with `n` too (6.8 MiB at 10⁴ up to 812 MiB at 10⁷), because
+the `m_k` factorisation table and the sorted ART item list are held in full (`O(N)` words)
+before any chunk runs, matching a caveat the reconstruction doc states about its own prototype
+(§7: "bookkeeping memory in the prototype is `O(N)`, not `O(m)`... the prototype does not [stream
+it]"). This port carries the same caveat forward rather than fixing it — see the module docs in
+`src/nthdigit2.rs` for exactly what's `O(mem_bits)` (the product tree + recurrence state per ART
+chunk, and the p-adic tables, built and dropped one prime at a time) versus what's `O(N)` (the
+factor table and item list). Fixing this for real means factoring `m_k` chunk-by-chunk with a
+segmented sieve restricted to each chunk's numeric window instead of sieving `[0, N)` up front
+(doc §4.4's last paragraph) — routine, but out of scope for this session.
+
+Practically: Theorem 2 is unambiguously the faster algorithm from `n ≈ 10⁴` upward on this
+machine, by a growing margin, and its digits check out against both Theorem 1 and two
+independent MPFR bindings through `n = 10⁷`. Its memory story is *not* yet the `O(mem_bits)`
+headline the theorem promises — plan for `O(N)`-ish RSS (hundreds of MiB by `n = 10⁷`) until the
+streaming item-generation described in doc §4.4 gets implemented.
