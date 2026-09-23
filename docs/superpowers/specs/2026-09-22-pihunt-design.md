@@ -235,3 +235,21 @@ Built directly from the roadmap above (no separate spec/plan, at the user's requ
 - **Resume + escalation** (`src/runner.rs`): each job runs as a chain of attempts at 1×, 2×, 4×… digits while inconclusive. Attempts whose job ID is already in the output log are reused, so re-running a batch resumes it. Records gain `escalated_from` (serde default, so stage-1 logs still load).
 - **Report:** `pihunt report <logs...>` prints markdown: strongest exclusion per shape, hits (NEW ones in their own section), deduplicated basis relations, unresolved shapes.
 - **Deferred:** digit extractor (no NEW hit exists); Householder LQ / three-level PSLQ (next speedup).
+
+### Sharding
+
+`pihunt run <batch.toml> --shard k/N` (1-based `k`, `1 <= k <= N`) runs only the jobs assigned to
+shard `k`, so one batch can be split across machines. Assignment is by job ID, not position: the
+first 16 hex chars of the *base* job's ID (escalation attempt 0, before any `--escalate` retries)
+are parsed as a `u64` and reduced mod `N`; shard `k` owns the value `k - 1`. Hashing the base ID
+keeps a whole escalation chain in one shard even though later attempts run at higher precision
+(and so have different IDs).
+
+With `--shard`, the default output path gains a `.shard-k-of-N` suffix before the extension
+(`results/base10-wide.jsonl` → `results/base10-wide.shard-2-of-4.jsonl`), so shards never
+clobber each other's log even when run on one machine; resume reads that shard's log. `pihunt plan
+<batch.toml> --shard k/N` reports that shard's job count alongside the batch total. To recombine,
+`pihunt report` already accepts multiple logs: `pihunt report results/base10-wide.shard-*.jsonl`.
+
+Malformed specs (`0/4`, `5/4`, `2/0`, non-numeric) are rejected at CLI parse time with a
+non-zero exit and an `error: ...` message.
