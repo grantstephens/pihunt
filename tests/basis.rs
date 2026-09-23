@@ -66,7 +66,25 @@ fn column_layout() {
 fn auto_digits_monotone() {
     assert!(auto_digits(10, 1000) < auto_digits(11, 1000));
     assert!(auto_digits(10, 1000) < auto_digits(10, 10_000));
-    assert_eq!(auto_digits(9, 1000), 91); // ceil(9 * 3 * 1.5) + 50
+    assert_eq!(auto_digits(9, 1000), 91); // ceil(9 * 3 * 1.5) + 50 - n <= 36, rule unchanged
+}
+
+/// Past n0 = 36 the factor grows (see docs/precision-rule.md); below it, it's the original
+/// flat 1.5. This is the case that used to come back Inconclusive at n = 100, C = 1e5 (800
+/// digits under the old flat rule).
+#[test]
+fn auto_digits_scales_up_past_n0() {
+    assert_eq!(
+        auto_digits(36, 1000),
+        50 + (36.0f64 * 3.0 * 1.5).ceil() as u32
+    );
+    assert_eq!(
+        auto_digits(100, 100_000),
+        50 + (100.0f64 * 5.0 * 3.1).ceil() as u32
+    );
+    let old_flat_rule = 50 + (100.0f64 * 5.0 * 1.5).ceil() as u32;
+    assert_eq!(old_flat_rule, 800); // the Inconclusive case from the problem report
+    assert!(auto_digits(100, 100_000) > old_flat_rule);
 }
 
 #[test]

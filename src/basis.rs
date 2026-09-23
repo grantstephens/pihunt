@@ -112,9 +112,22 @@ pub fn series(base: u32, period: u32, j: u32, s: u32, bits: u32) -> Float {
 }
 
 /// Decimal digits needed so PSLQ can find relations with max |coeff| <= c among n columns.
-/// Factor 1.5 measured in prototyping: 1.25 let spurious 10^7-size relations through at n ~ 45.
+///
+/// `digits = ceil(n * log10(C) * f(n)) + 50`, with `f(n) = 1.5 + 0.025 * max(0, n - 36)`.
+///
+/// The flat factor 1.5 was measured in prototyping at n ~ 45 (1.25 let spurious 10^7-size
+/// relations through there). That holds up to n ~ 36-39, but thins out badly beyond it: an
+/// n = 100 job at C = 10^5 came back `Inconclusive` at the resulting 800 digits (reduction
+/// PSLQ hit a precision-floor "relation" with ~10^10 coefficients, correctly rejected by the
+/// checks). `tests/precision_rule.rs` measures the smallest factor that resolves real shapes
+/// (bases 10/100/1000, C in 10^3..10^5) with `MultilevelPslq`, requiring — worst case over C,
+/// since larger C already buys more digits via log10(C) — roughly 1.5 up to n = 36-39, 1.75 by
+/// n = 47-55, 2.0 by n = 67-71, 2.5 by n = 79-100. The linear term above matches or slightly
+/// exceeds every measured point (see docs/precision-rule.md for the full table and the
+/// alternatives considered) while leaving n <= 36 exactly as before.
 pub fn auto_digits(n: usize, coeff_bound: u64) -> u32 {
-    (n as f64 * (coeff_bound as f64).log10() * 1.5).ceil() as u32 + 50
+    let f = 1.5 + 0.025 * (n as f64 - 36.0).max(0.0);
+    (n as f64 * (coeff_bound as f64).log10() * f).ceil() as u32 + 50
 }
 
 /// Column values at working precision (`lo`) and at twice it (`hi`, for verification).

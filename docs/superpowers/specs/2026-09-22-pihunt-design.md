@@ -235,3 +235,12 @@ Built directly from the roadmap above (no separate spec/plan, at the user's requ
 - **Resume + escalation** (`src/runner.rs`): each job runs as a chain of attempts at 1×, 2×, 4×… digits while inconclusive. Attempts whose job ID is already in the output log are reused, so re-running a batch resumes it. Records gain `escalated_from` (serde default, so stage-1 logs still load).
 - **Report:** `pihunt report <logs...>` prints markdown: strongest exclusion per shape, hits (NEW ones in their own section), deduplicated basis relations, unresolved shapes.
 - **Deferred:** digit extractor (no NEW hit exists); Householder LQ / three-level PSLQ (next speedup).
+
+## Stage 3: precision rule (2026-09-22/23)
+
+`auto_digits`'s flat factor 1.5 (measured at n ≈ 45) was too thin at n ≈ 100: jobs came back
+`Inconclusive` (reduction hit a precision-floor relation) or `Suspicious` (main search did the
+same), both correctly rejected but expensive to discover — the runner's fix is to escalate and
+redo the whole job from scratch. `auto_digits` now grows the factor past n ≈ 36 based on direct
+measurement instead of guessing further. Full measurement table, the fitted rule, and a
+before/after run of the reported n = 100 example are in `docs/precision-rule.md`.
