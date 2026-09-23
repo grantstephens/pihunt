@@ -379,8 +379,11 @@ fn extract_digits(mut x: u128, count: usize) -> String {
     s
 }
 
-/// A conservative (rounded up) bound, in fixed-point units (`err / 2^128`), on `10^-n0`.
-fn error_units(n0: u32) -> u128 {
+/// A conservative bound, in fixed-point units (`err / 2^128`), on the total error of
+/// `frac_10n_pi`: the series truncation (`< 10^-n0`, Gourdon's Proposition 1, rounded up)
+/// plus one ulp of fixed-point rounding for each of the `terms` accumulated fractions
+/// (each is floored once, then added or subtracted exactly).
+fn error_units(n0: u32, terms: u64) -> u128 {
     let num = Integer::from(1) << 128u32;
     let den = Integer::from(10).pow(n0);
     let mut q = Integer::from(&num / &den);
@@ -388,8 +391,18 @@ fn error_units(n0: u32) -> u128 {
     if rem > 0 {
         q += 1;
     }
-    q.to_string().parse().unwrap_or(u128::MAX)
+    q += terms;
+    q.to_u128().unwrap_or(u128::MAX)
 }
+
+/// Largest `n0` worth attempting: rounding costs up to one ulp (2^-128) per term, and there
+/// are ~2^45 terms by n ~ 10^9 (~10^-25), so a truncation bound much below 10^-24 can't be
+/// certified anyway. `error_units` still accounts for the rounding exactly; this only stops
+/// the guard-doubling loop from chasing precision the accumulator doesn't have.
+const MAX_N0: u32 = 24;
+
+/// Most digits one evaluation hands out; longer requests are split (see [`digits`]).
+const CHUNK: usize = 16;
 
 /// Below this position, just ask MPFR for π directly — it's cheap there, and it sidesteps
 /// [`Params::new`]'s `N <= n + 2` precondition for small `n`.
@@ -407,15 +420,26 @@ pub fn digits(n: u64, count: usize) -> String {
     if count == 0 {
         return String::new();
     }
+    if count > CHUNK {
+        // One fixed-point evaluation can only certify ~MAX_N0 digits, so long requests are
+        // stitched together from independent chunks.
+        return (0..count)
+            .step_by(CHUNK)
+            .map(|i| digits(n + i as u64, CHUNK.min(count - i)))
+            .collect();
+    }
     let mut guard: u64 = 4;
     loop {
         let n0 = count as u64 + guard;
-        if n < SMALL_N_THRESHOLD || n < 4 * n0 || n0 > u32::MAX as u64 {
+        if n < SMALL_N_THRESHOLD || n < 4 * n0 || n0 > MAX_N0 as u64 {
+            // Past MAX_N0 the u128 accumulator can't certify the digits (a pathological run of
+            // ~20 equal digits right after the block). MPFR is exact but needs O(n) memory.
             return digits_via_mpfr(n, count);
         }
         let n0 = n0 as u32;
         let x = frac_10n_pi(n, n0);
-        let err = error_units(n0);
+        let p = Params::new(n, n0);
+        let err = error_units(n0, (p.m + 1) * p.big_n + p.big_n);
         let base = extract_digits(x, count);
         let plus = extract_digits(x.wrapping_add(err), count);
         let minus = extract_digits(x.wrapping_sub(err), count);
@@ -439,4 +463,17 @@ fn digits_via_mpfr(n: u64, count: usize) -> String {
     let s = int_part.to_string(); // "3" followed by `total` decimal digits
     let start = (n + 1) as usize;
     s[start..start + count].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_bound_includes_rounding_per_term() {
+        let base = error_units(20, 0);
+        assert_eq!(error_units(20, 1_000), base + 1_000);
+        // At n0 = 30 the truncation bound is below what 10^10 rounded terms can promise.
+        assert!(error_units(30, 10_000_000_000) > 2 * error_units(30, 0));
+    }
 }

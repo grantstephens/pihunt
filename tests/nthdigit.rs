@@ -288,3 +288,11 @@ fn cli_stream_prints_independent_blocks() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines, vec!["14159", "26535"]);
 }
+
+/// Requests longer than one certified chunk are stitched from independent chunks and must
+/// still match MPFR exactly across the chunk seams.
+#[test]
+fn long_requests_are_chunked_correctly() {
+    let reference = reference_pi_digits(6_000);
+    assert_digits_match(&reference, 5_000, 50);
+}
