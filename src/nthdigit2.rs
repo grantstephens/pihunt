@@ -51,19 +51,55 @@
 //!
 //! # Memory: what's `O(mem_bits)` and what isn't (be honest, doc §7)
 //!
-//! The ART's bignum working set — the product tree and `(P,T,D)` state for one chunk, and one
-//! group's binary-splitting stack within it — is `O(mem_bits log(mem_bits))` bits, matching
-//! doc §5.1. **That part is real and is what's measured below.** What is *not* streamed, matching
-//! the prototype's own stated limitation (doc §7): the factorisation table for all `m_k`
-//! (`k < N`) and the sorted ART item list are held in full, `O(N)` words, before any chunk
-//! runs. `N` is much smaller than `n` (doc §5.4: `N = Θ(n/log(n/m))`), but for large `n` this
-//! `O(N)`-word bookkeeping — not the `O(mem_bits)` bignum arithmetic — is what dominates peak
-//! RSS in this implementation. A fully streaming version would factor `m_k` chunk-by-chunk with
-//! a segmented sieve restricted to that chunk's numeric window (doc §4.4, last paragraph)
-//! instead of sieving the whole `[0, N)` range up front; that's routine but not implemented
-//! here (same caveat the prototype records). The p-adic tables (`O(p)` words per prime, doc
-//! §5.2) are built and dropped one prime at a time, so their peak is `O(max p)` over the primes
-//! actually used, not `O(Σp)`.
+//! The C-part item generation is **streamed** (doc §4.4's last paragraph, implemented here):
+//! there is no global `O(N)` factorisation table and no global sorted item list. Instead:
+//!
+//! * [`stream_needs_and_chunks`] makes one sequential pass over target `t = 0..N/2` (both
+//!   `k = t` and `k = N-1-t` per target, doc §4.4: "Main items come out naturally in target
+//!   order"), factoring `O(sqrt(N))`-sized windows at a time via [`factor_window`] (freed once
+//!   processed) and deciding Main-item **chunk boundaries by running bit-count alone** — the
+//!   items themselves aren't kept, only their bit lengths, until a chunk's worth (`~mem_bits`)
+//!   has been seen. [`art_chunk_by_range`] then *regenerates* each chunk's items from its target
+//!   window (re-factoring that one small window) instead of slicing a pre-built array, so at
+//!   most one chunk's items (`O(mem_bits / log n)`) are ever live at once. The ART's own bignum
+//!   working set — product tree, `(P,T,D)` state, one group's binary-splitting stack, per chunk
+//!   — stays `O(mem_bits log(mem_bits))` bits (doc §5.1), run in parallel across chunks.
+//! * Small-prime Lucas/p-adic needs (`p <= sqrt(max m_k)`, doc §4.3) are collected into
+//!   `HashMap`s bounded by `O(pi(sqrt(max m_k)))` entries (at most two `(p, r)` keys per prime,
+//!   doc §4.4: "the k with p | m_k form an arithmetic progression... share one or two such
+//!   items") and resolved by their own small dedicated ART sub-pass
+//!   ([`resolve_lucas_items`]) — doc §4.4's "process small primes in their own pass with their
+//!   own small ART". p-adic tables (`O(p)` words per prime, doc §5.2) are still built and
+//!   dropped one prime at a time, so their peak is `O(max p)` over primes actually used, not
+//!   `O(Σp)`; here `p <= sqrt(max m_k)`, so that peak is `O(sqrt(max m_k))`, not `O(N)`.
+//! * The small-primes sieve itself ([`primes_upto`], up to `sqrt(max m_k)`) is
+//!   `O(pi(sqrt(max m_k)))` words — explicitly within budget (it doesn't grow with `N` the way
+//!   the old per-`k` factor table did; for `mem_bits ∝ sqrt(n)` it's `O(n^{0.75}/log n)`-ish, far
+//!   below the other terms in practice — see the measured table in `docs/nthdigit.md`).
+//!
+//! **What's still not `O(mem_bits)` (doc §7's one remaining honest caveat):** a prime `p` can
+//! divide `m_k` *without* being `<= sqrt(max m_k)` — it's `m_k`'s single larger leftover
+//! cofactor (there's at most one per `k`, `m_k`'s factorisation leaves at most one prime factor
+//! above its square root). When that cofactor is itself `<= t_k`, it still needs Lucas
+//! treatment, but unlike a small sieve prime it's essentially unique to one or two `k` (not
+//! shared by a residue-class arithmetic progression), so it can't be resolved by the same
+//! bounded per-prime iteration. [`stream_needs_and_chunks`] collects these into `cofactor`, a
+//! `Vec` whose size is **not** bounded independent of `N` — measured at roughly 15-40% of `N`
+//! entries (24 bytes each) across the `n = 1e5..1e7` range tested (rises with `n` because larger
+//! `N` relative to `sqrt(max m_k)` gives more room for a `t`-sized cofactor). It's still `O(N)`
+//! words, just a single flat `Vec` of small tuples rather than the old `Vec<Vec<(u64,u32)>>`
+//! factor table plus a full `Vec<Item>` plus multiple `HashMap`s — an order of magnitude smaller
+//! in practice (see the peak-RSS table in `docs/nthdigit.md`), but not asymptotically fixed.
+//! Eliminating it for real would need either an external (disk-backed) sort of the cofactor
+//! needs by target, or a smarter per-prime classification that doesn't require discovering the
+//! cofactor's value before knowing whether it's "small" — both are future work, not implemented
+//! here.
+//!
+//! **Overall bound achieved:** peak memory is `O(mem_bits log(mem_bits) * threads + pi(sqrt(max
+//! m_k)) + chunks + cofactor_count)` where `chunks = O(N log n / mem_bits)` (tiny: a few thousand
+//! `(u64,u64)` pairs even at `n = 1e7`) and `cofactor_count` is the one term above that scales
+//! with `N` (empirically a fraction of `N`, not all of it, and much cheaper per entry than the
+//! structures it replaced).
 
 use crate::nthdigit::{
     self, MAX_N0, extract_digits, frac_fixed_point, mod_inverse, mulmod, powmod, signed,

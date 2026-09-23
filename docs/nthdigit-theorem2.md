@@ -260,12 +260,36 @@ because Python punishes Theorem 1's word-level loop, which is why §6.1 uses a C
 
 ## 7. Caveats (be honest)
 
-* **Bookkeeping memory in the prototype is O(N), not O(m).** The factor table, the item list and
-  the X_k list are all held in full. Only the bignum working set honours the budget (the `peak~`
-  column is an upper bound on it: tree + state). §4.4 describes the streaming version; it is
-  routine but not written.
-* The p-adic tables are O(p) words, and p can reach √(2(M+1)N). For m < n^{2/3} that can exceed
-  m. Streaming the coefficients fixes it; not implemented.
+* **Bookkeeping memory in the Python prototype is O(N), not O(m).** The factor table, the item
+  list and the X_k list are all held in full. Only the bignum working set honours the budget (the
+  `peak~` column is an upper bound on it: tree + state). Not fixed in the prototype itself.
+
+  **Update (2026-09-23, Rust port `src/nthdigit2.rs`): the streaming construction this section
+  describes is now implemented**, and it removes the global factor table and global item list
+  entirely: `stream_needs_and_chunks` makes one sequential pass over target space, deciding
+  Main-item chunk boundaries by running bit-count alone (items are regenerated per chunk by
+  `art_chunk_by_range`, re-factoring just that chunk's target window, never held globally), and
+  small-prime (`p <= sqrt(max m_k)`) Lucas/p-adic needs are collected into `O(pi(sqrt(max
+  m_k)))`-bounded maps and resolved by "small primes in their own pass with their own small ART"
+  exactly as this section proposed. **One piece did not reduce to a bounded structure**: a `k`'s
+  leftover factorisation cofactor (the single prime factor of `m_k` above `sqrt(max m_k)`, if
+  any) is sometimes itself `<= t_k` and needs Lucas treatment, but — unlike a small sieve prime —
+  it's essentially unique to that `k` (or its mirror), not shared by a residue-class arithmetic
+  progression the way `p <= sqrt(max m_k)` primes are, so it can't be resolved by the same
+  bounded per-prime iteration. Measured at n = 1e5..1e7, this affects roughly 15-40% of `k`
+  (rising with `n`, since `N` grows relative to `sqrt(max m_k)`), and is now kept as a single flat
+  `Vec<(p, k, t)>` (24 bytes/entry) rather than inside the old per-`k` factor table + item list +
+  several `HashMap`s — an order of magnitude smaller in practice (measured peak RSS: see
+  `docs/nthdigit.md`'s updated Theorem-2 benchmark table) but still genuinely `O(N)`, not `O(m)`.
+  Eliminating it fully would need an external (disk-backed) sort of these needs by target, or a
+  cleverer classification that doesn't require computing the cofactor's value before knowing
+  whether it counts as "small"; neither is implemented.
+* The p-adic tables are O(p) words, and p can reach √(2(M+1)N) *in principle*. In the Rust port,
+  p-adic treatment only ever applies to primes `<= sqrt(max m_k)` (a prime above that bound
+  divides `m_k` to at most the first power, by construction — see above), so its p-adic tables'
+  peak is `O(sqrt(max m_k))`, not `O(√(2(M+1)N))` or `O(N)`. Streaming the coefficients further
+  (within a single large prime's table) is still not implemented, but isn't needed at the `m`
+  values tested.
 * Python per-leaf overhead is a large constant in the ART. B is numpy-vectorised; C is not. So the
   prototype's best M is tuned to Python, not to a native build. A Rust/C port with GMP
   (`rug`) should be much faster per leaf. We'd expect the speedup over Theorem 1 to grow like
