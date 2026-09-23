@@ -9,4 +9,5 @@ pub mod pslq;
 pub mod reduce;
 pub mod report;
 pub mod runner;
+pub mod shard;
 pub mod verify;

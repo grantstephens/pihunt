@@ -3,6 +3,7 @@ use pihunt::basis::{Columns, Extra, Shape};
 use pihunt::log::{Kind, Record};
 use pihunt::report::{describe, formula};
 use pihunt::runner::{Ctx, load_done, run_chain};
+use pihunt::shard::Shard;
 use pihunt::{config, log, plan, report, verify};
 use rayon::prelude::*;
 use rug::Integer;
@@ -20,9 +21,19 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run every job in a batch file, appending results to its output log.
-    Run { batch: PathBuf },
+    Run {
+        batch: PathBuf,
+        /// Run only shard k of N (1-based), e.g. "2/4". Splits the output log too.
+        #[arg(long)]
+        shard: Option<Shard>,
+    },
     /// Dry run: show how big a batch is without running it.
-    Plan { batch: PathBuf },
+    Plan {
+        batch: PathBuf,
+        /// Report the job count for shard k of N (1-based), e.g. "2/4".
+        #[arg(long)]
+        shard: Option<Shard>,
+    },
     /// Re-verify every hit in a results log at 2x precision.
     Verify { results: PathBuf },
     /// Markdown exclusion report over one or more results logs, to stdout.
@@ -34,8 +45,8 @@ enum Cmd {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().cmd {
-        Cmd::Run { batch } => run(batch),
-        Cmd::Plan { batch } => show_plan(batch),
+        Cmd::Run { batch, shard } => run(batch, shard),
+        Cmd::Plan { batch, shard } => show_plan(batch, shard),
         Cmd::Verify { results } => reverify(results),
         Cmd::Report { results } => write_report(results),
     };
@@ -45,9 +56,19 @@ fn main() -> ExitCode {
     })
 }
 
-fn run(path: PathBuf) -> Result<ExitCode, String> {
+fn run(path: PathBuf, shard: Option<Shard>) -> Result<ExitCode, String> {
     let batch = config::load(&path)?;
-    let jobs = plan::plan(&batch);
+    let ctx = Ctx {
+        batch: &batch.name,
+        finder: batch.defaults.finder.finder(),
+        max_columns: batch.defaults.max_columns,
+        escalate: batch.defaults.escalate,
+    };
+    let mut jobs = plan::plan(&batch);
+    if let Some(shard) = shard {
+        jobs.retain(|j| shard.owns(j, ctx.finder.name()));
+    }
+    let output = shard.map_or_else(|| batch.output.clone(), |s| s.output_path(&batch.output));
     let threads = batch
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
@@ -55,14 +76,8 @@ fn run(path: PathBuf) -> Result<ExitCode, String> {
         .num_threads(threads)
         .build()
         .map_err(|e| e.to_string())?;
-    let done = load_done(&batch.output)?;
-    let (tx, writer) = log::spawn_writer(&batch.output).map_err(|e| e.to_string())?;
-    let ctx = Ctx {
-        batch: &batch.name,
-        finder: batch.defaults.finder.finder(),
-        max_columns: batch.defaults.max_columns,
-        escalate: batch.defaults.escalate,
-    };
+    let done = load_done(&output)?;
+    let (tx, writer) = log::spawn_writer(&output).map_err(|e| e.to_string())?;
     let (finished, ran, resumed) = (
         AtomicUsize::new(0),
         AtomicUsize::new(0),
@@ -73,7 +88,7 @@ fn run(path: PathBuf) -> Result<ExitCode, String> {
         "{}: {total} jobs, {} finder, on {threads} threads → {} ({} attempts already logged)",
         batch.name,
         ctx.finder.name(),
-        batch.output.display(),
+        output.display(),
         done.len()
     );
 
@@ -116,9 +131,10 @@ fn run(path: PathBuf) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn show_plan(path: PathBuf) -> Result<ExitCode, String> {
+fn show_plan(path: PathBuf, shard: Option<Shard>) -> Result<ExitCode, String> {
     let batch = config::load(&path)?;
     let jobs = plan::plan(&batch);
+    let finder = batch.defaults.finder.finder();
     let max_cols = batch.defaults.max_columns;
     let (skipped, run): (Vec<_>, Vec<_>) = jobs.iter().partition(|j| j.shape.columns() > max_cols);
     println!(
@@ -127,7 +143,7 @@ fn show_plan(path: PathBuf) -> Result<ExitCode, String> {
         jobs.len(),
         run.len(),
         skipped.len(),
-        batch.defaults.finder.finder().name(),
+        finder.name(),
         1u32 << batch.defaults.escalate
     );
     if let (Some(n), Some(lo), Some(hi)) = (
@@ -136,6 +152,15 @@ fn show_plan(path: PathBuf) -> Result<ExitCode, String> {
         run.iter().map(|j| j.digits).max(),
     ) {
         println!("largest n = {n}, precision {lo}..={hi} digits");
+    }
+    if let Some(shard) = shard {
+        let owned = jobs.iter().filter(|j| shard.owns(j, finder.name())).count();
+        println!(
+            "shard {}/{}: {owned} jobs → {}",
+            shard.k,
+            shard.n,
+            shard.output_path(&batch.output).display()
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

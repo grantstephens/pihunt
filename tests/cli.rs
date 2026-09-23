@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::process::Command;
 
 const BATCH: &str = r#"
@@ -129,4 +130,87 @@ fn report_reads_logs() {
         .output()
         .unwrap();
     assert!(!missing.status.success());
+}
+
+fn job_ids(path: &std::path::Path) -> HashSet<String> {
+    pihunt::log::read(path)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.job_id)
+        .collect()
+}
+
+#[test]
+fn sharding_splits_the_batch_without_dropping_or_duplicating_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("r.jsonl");
+    let batch = dir.path().join("b.toml");
+    std::fs::write(&batch, BATCH.replace("OUT", out.to_str().unwrap())).unwrap();
+    let bin = env!("CARGO_BIN_EXE_pihunt");
+
+    let unsharded = Command::new(bin)
+        .args(["run", batch.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(unsharded.status.success());
+    let unsharded_ids = job_ids(&out);
+
+    let shard1 = out.with_file_name("r.shard-1-of-2.jsonl");
+    let shard2 = out.with_file_name("r.shard-2-of-2.jsonl");
+    for (k, path) in [(1, &shard1), (2, &shard2)] {
+        assert!(!path.exists());
+        let run = Command::new(bin)
+            .args(["run", batch.to_str().unwrap(), "--shard", &format!("{k}/2")])
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_ne!(path, &out);
+    }
+
+    let combined: HashSet<String> = job_ids(&shard1).union(&job_ids(&shard2)).cloned().collect();
+    assert_eq!(combined, unsharded_ids);
+    // The two shards must not overlap.
+    assert_eq!(job_ids(&shard1).intersection(&job_ids(&shard2)).count(), 0);
+}
+
+#[test]
+fn plan_reports_shard_job_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("r.jsonl");
+    let batch = dir.path().join("b.toml");
+    std::fs::write(&batch, BATCH.replace("OUT", out.to_str().unwrap())).unwrap();
+    let plan = Command::new(env!("CARGO_BIN_EXE_pihunt"))
+        .args(["plan", batch.to_str().unwrap(), "--shard", "1/2"])
+        .output()
+        .unwrap();
+    assert!(plan.status.success());
+    assert!(
+        String::from_utf8_lossy(&plan.stdout).contains("shard 1/2:"),
+        "{}",
+        String::from_utf8_lossy(&plan.stdout)
+    );
+}
+
+#[test]
+fn bad_shard_spec_fails_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("r.jsonl");
+    let batch = dir.path().join("b.toml");
+    std::fs::write(&batch, BATCH.replace("OUT", out.to_str().unwrap())).unwrap();
+    for spec in ["0/4", "5/4", "2/0", "abc"] {
+        let run = Command::new(env!("CARGO_BIN_EXE_pihunt"))
+            .args(["run", batch.to_str().unwrap(), "--shard", spec])
+            .output()
+            .unwrap();
+        assert!(!run.status.success(), "{spec}");
+        assert!(
+            String::from_utf8_lossy(&run.stderr).starts_with("error:"),
+            "{spec}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
 }
