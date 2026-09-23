@@ -311,6 +311,43 @@ fn main_modulus(t: u64, rem: u64, fac: &[(u64, u32)]) -> Option<u64> {
     (good > 1).then_some(good)
 }
 
+/// Compact stand-in for "every `k` in `[0, N)` with a given small-prime property, split by
+/// which side of the mirror it's on" (doc §4.4/§7's fix for the memory this used to cost).
+///
+/// For a *fixed* prime `p` and a fixed side, the set of `k` sharing a small-prime property
+/// (`p | m_k`, or `p^2 | m_k`) is a single arithmetic progression in `k` (`m_k = base + 2k` is
+/// linear, so `m_k ≡ 0 (mod q)` picks out one residue class of `k` mod `q`), and — because
+/// [`stream_needs_and_chunks`] scans `t` in increasing order and, within one side, `t` is a
+/// strictly monotonic linear function of `k` (`t = k` on the low side, `t = N-1-k` on the high
+/// side) — the matching `t`s are visited in strictly increasing order too. So instead of
+/// collecting every matching `(k, t)` (what the old `Vec<(k, t)>` per key did: `O(N loglog
+/// sqrt(max m_k))` words total, measured as the dominant term at `n = 1e6..3e6`, see the module
+/// docs), each side only needs its first and last `t` seen: the step (`p` for Lucas, `p^2` for
+/// p-adic) is recoverable from the key, so `(t_min, t_max)` plus that step describes the *exact*
+/// same membership with two `u64`s instead of up to `O(N/p)` pairs. This collapses both
+/// `lucas_small` and `padic_small` to `O(pi(sqrt(max m_k)))` words, matching what the module
+/// docs originally (incorrectly) claimed the `HashMap`s already cost.
+#[derive(Default, Clone, Copy)]
+struct SideRanges {
+    /// Low side (`k = t`): inclusive `(t_min, t_max)` of every eligible `t` seen.
+    lo: Option<(u64, u64)>,
+    /// High side (`k = N-1-t`): same, in `t`-space.
+    hi: Option<(u64, u64)>,
+}
+
+impl SideRanges {
+    /// Records one more eligible `t` on the given side. Relies on the caller visiting `t` in
+    /// non-decreasing order per side (true for both [`stream_needs_and_chunks`]'s scan and,
+    /// since it's built from that same scan's output, the cofactor regrouping in [`c_part`]).
+    fn extend(&mut self, is_high: bool, t: u64) {
+        let slot = if is_high { &mut self.hi } else { &mut self.lo };
+        match slot {
+            Some((_, t_max)) => *t_max = t,
+            None => *slot = Some((t, t)),
+        }
+    }
+}
+
 /// Every non-`Main` contribution for one `k` (doc §4.3): small-prime Lucas needs (`p <= t`,
 /// `e == 1`), small-prime p-adic needs (`p <= t`, `e >= 2`), and the one-off "cofactor Lucas"
 /// case (leftover cofactor `<= t`) that doc §7 calls out as the part that doesn't fit neatly
@@ -322,18 +359,19 @@ fn classify_extras(
     k: u64,
     rem: u64,
     fac: &[(u64, u32)],
-    lucas_small: &mut HashMap<(u64, u64), Vec<(u64, u64)>>,
-    padic_small: &mut HashMap<u64, Vec<(u64, u64, u32)>>,
+    lucas_small: &mut HashMap<u64, SideRanges>,
+    padic_small: &mut HashMap<u64, SideRanges>,
     cofactor: &mut Vec<(u64, u64, u64)>, // (p, k, t)
 ) {
+    let is_high = k != t;
     for &(p, e) in fac {
         if p > t {
             continue;
         }
         if e == 1 {
-            lucas_small.entry((p, t % p)).or_default().push((k, t));
+            lucas_small.entry(p).or_default().extend(is_high, t);
         } else {
-            padic_small.entry(p).or_default().push((k, t, e));
+            padic_small.entry(p).or_default().extend(is_high, t);
         }
     }
     if rem > 1 && rem <= t {
@@ -352,10 +390,12 @@ struct StreamNeeds {
     /// regenerates each chunk's items from scratch (cheap re-factoring) rather than this pass
     /// keeping them around.
     chunk_bounds: Vec<(u64, u64)>,
-    /// `(p, r) -> [(k, t)]` for small primes (`p <= sqrt(max m_k)`, `e == 1`).
-    lucas_small: HashMap<(u64, u64), Vec<(u64, u64)>>,
-    /// `p -> [(k, t, e)]` for small primes with `e >= 2`.
-    padic_small: HashMap<u64, Vec<(u64, u64, u32)>>,
+    /// `p -> ranges` for small primes (`p <= sqrt(max m_k)`, `e == 1`): see [`SideRanges`].
+    lucas_small: HashMap<u64, SideRanges>,
+    /// `p -> ranges` for small primes with `e >= 2` (step `p^2`, exact `e` recomputed per `k` at
+    /// consumption time — see [`padic_consumers`] — rather than stored, since within one `p` it
+    /// varies member-to-member and storing it was exactly the `Vec<(k,t,e)>` this replaces).
+    padic_small: HashMap<u64, SideRanges>,
     /// `(p, k, t)` triples for the cofactor-Lucas case (doc §7 caveat: `O(fraction * N)`, not
     /// bounded independent of `N`).
     cofactor: Vec<(u64, u64, u64)>,
@@ -390,8 +430,8 @@ fn stream_needs_and_chunks(
     let half = big_n / 2;
     let batch = stream_batch_size(half);
     let mut chunk_bounds = Vec::new();
-    let mut lucas_small: HashMap<(u64, u64), Vec<(u64, u64)>> = HashMap::new();
-    let mut padic_small: HashMap<u64, Vec<(u64, u64, u32)>> = HashMap::new();
+    let mut lucas_small: HashMap<u64, SideRanges> = HashMap::new();
+    let mut padic_small: HashMap<u64, SideRanges> = HashMap::new();
     let mut cofactor = Vec::new();
     let mut bits_acc = 0u64;
     let mut chunk_start = 0u64;
@@ -632,6 +672,13 @@ struct PadicBinom {
     pow_p: Vec<u64>,                                 // pow_p[i] = p^i, i <= emax
     gp: Vec<Vec<u64>>, // gp[i] = coefficients of g^i mod p^emax, i < emax
     rows: HashMap<(u64, u64), (Vec<u64>, Vec<u64>)>, // (N0, mod) -> (coeffs, prefix sums)
+    /// `(N, t, e) -> s_t(N) mod p^e` / `C(N,t) mod p^e`, memoising *within one query's*
+    /// recursion tree (bounded, `O(e^2 log_p N)` per doc §5.2's per-query cost). **Must be
+    /// cleared between top-level queries** ([`PadicBinom::clear_query_memo`]) — see that
+    /// method's docs for why: left to grow across an entire prime's `klist`, this was measured
+    /// to reach `O(klist.len())` entries for small `p` (most of one profiled 447 MiB peak at
+    /// `n=1e7`), because a top-level call's `t` is essentially unique per `k`, so nothing above
+    /// the first recursion level ever gets reused across different `k`s anyway.
     memo_s: HashMap<(u64, i64, u32), u64>,
     memo_c: HashMap<(u64, i64, u32), u64>,
 }
@@ -826,6 +873,16 @@ impl PadicBinom {
         };
         self.memo_c.insert((big_n, t as i64, e), r);
         r
+    }
+
+    /// Clears `memo_s`/`memo_c` between top-level queries (see their field docs). Cheap
+    /// (`HashMap::clear` keeps the allocation, so the capacity settles at the largest single
+    /// query's recursion tree, not the number of queries) and correctness-neutral: `s`/`c` are
+    /// pure functions of `(self.p, big_n, t, e)`, so discarding memo entries only forces
+    /// recomputation, never a different answer.
+    fn clear_query_memo(&mut self) {
+        self.memo_s.clear();
+        self.memo_c.clear();
     }
 }
 
@@ -1058,27 +1115,68 @@ fn resolve_lucas_items(
         })
 }
 
+/// One [`Tag::Lucas`] ART item per populated side of every prime in `need` (doc §4.4: "all `k`
+/// with `p | m_k` share one or two such items"). Target `r = t_min % p` — well-defined because
+/// every `t` on one side of one prime's [`SideRanges`] shares the same residue mod `p` (that's
+/// exactly why the range compresses to two numbers in the first place).
+fn lucas_art_items(need: &HashMap<u64, SideRanges>) -> Vec<Item> {
+    let mut items = Vec::new();
+    for (&p, ranges) in need {
+        for (t_min, _) in [ranges.lo, ranges.hi].into_iter().flatten() {
+            let r = t_min % p;
+            items.push(Item {
+                t: r,
+                q: p,
+                tag: Tag::Lucas(p, r),
+            });
+        }
+    }
+    items
+}
+
 /// Resolves every `k` that needed a Lucas item (prime `p`, exponent 1) from the `(s_r, C(N,r))`
-/// values the ART produced, and folds each into the accumulator.
+/// values the ART produced, and folds each into the accumulator. Walks each side's `(t_min,
+/// t_max)` range directly (step `p`, doc §4.4/§7: the whole point of [`SideRanges`] is that this
+/// is the only place the full `k`/`t` list needs to exist, generated on the fly instead of held).
 fn lucas_consumers(
     n: u64,
     big_n: u64,
     base: u64,
-    lucas_need: &HashMap<(u64, u64), Vec<(u64, u64)>>,
+    lucas_need: &HashMap<u64, SideRanges>,
     lucas_val: &HashMap<(u64, u64), LucasVal>,
 ) -> (u128, u64) {
     use rayon::prelude::*;
     lucas_need
         .par_iter()
-        .map(|(&(p, _r), klist)| {
-            let (sr, cr) = lucas_val[&(p, _r)];
+        .map(|(&p, ranges)| {
             let mut cache = HashMap::new();
             let mut acc = 0u128;
-            for &(k, t) in klist {
-                let s = lucas_s(big_n, t, p, sr, cr, &mut cache);
-                acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, p, s));
+            let mut terms = 0u64;
+            for (is_high, range) in [(false, ranges.lo), (true, ranges.hi)] {
+                let Some((t_min, t_max)) = range else {
+                    continue;
+                };
+                let r = t_min % p;
+                let (sr, cr) = lucas_val[&(p, r)];
+                let mut t = t_min;
+                loop {
+                    let k = if is_high { big_n - 1 - t } else { t };
+                    // The "exactly e == 1" set has holes at the p^2 sub-progression (those k
+                    // belong to padic_small instead, doc §4.3's e>=2 case): a SideRanges range
+                    // only pins down min/max t, not that every step in between is a member, so
+                    // skip anything p^2 also divides here rather than double- or mis-counting.
+                    if !(base + 2 * k).is_multiple_of(p * p) {
+                        let s = lucas_s(big_n, t, p, sr, cr, &mut cache);
+                        acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, p, s));
+                        terms += 1;
+                    }
+                    if t == t_max {
+                        break;
+                    }
+                    t += p;
+                }
             }
-            (acc, klist.len() as u64)
+            (acc, terms)
         })
         .reduce(
             || (0u128, 0u64),
@@ -1086,28 +1184,71 @@ fn lucas_consumers(
         )
 }
 
+/// `v_p(base + 2k)`: the exact p-adic valuation of `m_k`, by trial division. Cheap (`e` is
+/// small in practice — this is only ever called for `k`s [`stream_needs_and_chunks`] already
+/// determined have `p^2 | m_k`, so `e >= 2`, and `p^e <= m_max` bounds it to `O(log_p m_max)`
+/// divisions). Recomputed here rather than stored because, unlike `p` itself, `e` is *not*
+/// constant along a [`SideRanges`] range (different members can have different exact powers of
+/// `p`) — storing it per-`k` is exactly the `Vec<(k,t,e)>` this module no longer keeps.
+fn padic_valuation(base: u64, k: u64, p: u64) -> u32 {
+    let mut m = base + 2 * k;
+    let mut e = 0u32;
+    while m.is_multiple_of(p) {
+        m /= p;
+        e += 1;
+    }
+    e
+}
+
 /// Resolves every `k` that needed the p-adic recursion (`p^e | m_k`, `e >= 2`), one
 /// [`PadicBinom`] table per prime (built and dropped independently, so peak memory across
-/// primes run in parallel is `threads * O(max p)`, not `O(Σp)`).
+/// primes run in parallel is `threads * O(max p)`, not `O(Σp)`). Walks each side's `(t_min,
+/// t_max)` range directly (step `p^2`: `p^2 | m_k` is what put this prime's `t`s in
+/// `padic_small` at all, doc §5.2's "arithmetic progression of difference p²").
 fn padic_consumers(
     n: u64,
     big_n: u64,
     base: u64,
-    padic_need: &HashMap<u64, Vec<(u64, u64, u32)>>,
+    padic_need: &HashMap<u64, SideRanges>,
+    m_max: u64,
 ) -> (u128, u64) {
     use rayon::prelude::*;
     padic_need
         .par_iter()
-        .map(|(&p, klist)| {
-            let emax = klist.iter().map(|&(_, _, e)| e).max().unwrap();
+        .map(|(&p, ranges)| {
+            // Safe emax bound: the largest e with p^e <= m_max (m_k never exceeds m_max), since
+            // we no longer track each k's actual e up front (see padic_valuation's docs). p >=
+            // 3 always (m_k is odd), so this loop is O(log_3 m_max) at worst, negligible.
+            let mut emax = 2u32;
+            while (p as u128).pow(emax + 1) <= m_max as u128 {
+                emax += 1;
+            }
             let mut pb = PadicBinom::new(p, emax);
             let mut acc = 0u128;
-            for &(k, t, e) in klist {
-                let s = pb.s(big_n, t as i64, e);
-                let q = pb.pow_p[e as usize];
-                acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, q, s));
+            let mut terms = 0u64;
+            let step = p * p;
+            for (is_high, range) in [(false, ranges.lo), (true, ranges.hi)] {
+                let Some((t_min, t_max)) = range else {
+                    continue;
+                };
+                let mut t = t_min;
+                loop {
+                    let k = if is_high { big_n - 1 - t } else { t };
+                    let e = padic_valuation(base, k, p);
+                    // Bounds memo_s/memo_c to one query's recursion tree instead of letting
+                    // them grow with the range's length — see PadicBinom's field docs.
+                    pb.clear_query_memo();
+                    let s = pb.s(big_n, t as i64, e);
+                    let q = pb.pow_p[e as usize];
+                    acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, q, s));
+                    terms += 1;
+                    if t == t_max {
+                        break;
+                    }
+                    t += step;
+                }
             }
-            (acc, klist.len() as u64)
+            (acc, terms)
         })
         .reduce(
             || (0u128, 0u64),
@@ -1129,8 +1270,12 @@ fn c_part(n: u64, p: Params2) -> (u128, u64) {
     let lg_n = 64 - big_n.leading_zeros();
     let m_max = base + 2 * (big_n - 1);
     let small_primes = primes_upto((m_max as f64).sqrt() as u64 + 2);
+    crate::mem_profile::checkpoint("c_part: start");
 
     let needs = stream_needs_and_chunks(base, big_n, &small_primes, p.mem_bits);
+    #[cfg(feature = "mem-profile")]
+    log_needs_sizes(&needs, &small_primes);
+    crate::mem_profile::checkpoint("c_part: after stream_needs_and_chunks");
 
     // Main items: regenerate + run each chunk independently, in parallel.
     let (main_acc, main_terms) = needs
@@ -1141,42 +1286,35 @@ fn c_part(n: u64, p: Params2) -> (u128, u64) {
             || (0u128, 0u64),
             |(a1, t1), (a2, t2)| (a1.wrapping_add(a2), t1 + t2),
         );
+    crate::mem_profile::checkpoint("c_part: after Main chunks");
 
     // Small-prime Lucas items: their own bounded ART sub-pass (targets <= sqrt(max m_k), doc
     // §4.4 "process small primes in their own pass with their own small ART").
-    let mut small_items: Vec<Item> = needs
-        .lucas_small
-        .keys()
-        .map(|&(p_, r)| Item {
-            t: r,
-            q: p_,
-            tag: Tag::Lucas(p_, r),
-        })
-        .collect();
+    let mut small_items = lucas_art_items(&needs.lucas_small);
     let small_lucas_val = resolve_lucas_items(n, big_n, base, &mut small_items, p.mem_bits, lg_n);
     let (lucas_acc, lucas_terms) =
         lucas_consumers(n, big_n, base, &needs.lucas_small, &small_lucas_val);
-    let (padic_acc, padic_terms) = padic_consumers(n, big_n, base, &needs.padic_small);
+    crate::mem_profile::checkpoint("c_part: after small-prime Lucas");
+    let (padic_acc, padic_terms) = padic_consumers(n, big_n, base, &needs.padic_small, m_max);
+    crate::mem_profile::checkpoint("c_part: after p-adic");
 
     // Cofactor Lucas items (doc §7: the one piece whose count isn't bounded independent of N —
-    // regroup the raw (p, k, t) triples by (p, r) first, same shape as lucas_small, then reuse
-    // the exact same machinery.
-    let mut cofactor_need: HashMap<(u64, u64), Vec<(u64, u64)>> = HashMap::new();
+    // regroup the raw (p, k, t) triples into the same SideRanges shape as lucas_small (doc §7's
+    // fix: k with q | m_k is an AP of step q here too, since q is prime — see SideRanges' docs),
+    // then reuse the exact same machinery. This doesn't shrink `cofactor` itself (still O(N) —
+    // most of these primes are each unique to one or two k, so the range rarely has more than
+    // one member), but it does mean there's only one Lucas-item/consumer implementation to get
+    // right, and it costs no more than the flat Vec did.
+    let mut cofactor_need: HashMap<u64, SideRanges> = HashMap::new();
     for (p_, k, t) in needs.cofactor {
-        cofactor_need.entry((p_, t % p_)).or_default().push((k, t));
+        cofactor_need.entry(p_).or_default().extend(k != t, t);
     }
-    let mut cofactor_items: Vec<Item> = cofactor_need
-        .keys()
-        .map(|&(p_, r)| Item {
-            t: r,
-            q: p_,
-            tag: Tag::Lucas(p_, r),
-        })
-        .collect();
+    let mut cofactor_items = lucas_art_items(&cofactor_need);
     let cofactor_lucas_val =
         resolve_lucas_items(n, big_n, base, &mut cofactor_items, p.mem_bits, lg_n);
     let (cofactor_acc, cofactor_terms) =
         lucas_consumers(n, big_n, base, &cofactor_need, &cofactor_lucas_val);
+    crate::mem_profile::checkpoint("c_part: after cofactor Lucas (end)");
 
     (
         main_acc
@@ -1185,6 +1323,34 @@ fn c_part(n: u64, p: Params2) -> (u128, u64) {
             .wrapping_add(cofactor_acc),
         main_terms + lucas_terms + padic_terms + cofactor_terms,
     )
+}
+
+/// Prints an explicit heap-footprint breakdown of [`StreamNeeds`]' structures (task: "profile
+/// memory composition" — a global allocator peak alone can't say *which* structure is big).
+/// `.capacity()`, not `.len()`, since that's what's actually resident.
+#[cfg(feature = "mem-profile")]
+fn log_needs_sizes(needs: &StreamNeeds, small_primes: &[u64]) {
+    use std::mem::{size_of, size_of_val};
+    let lucas_bytes = needs.lucas_small.capacity() * (size_of::<u64>() + size_of::<SideRanges>());
+    let padic_bytes = needs.padic_small.capacity() * (size_of::<u64>() + size_of::<SideRanges>());
+    let cofactor_bytes = needs.cofactor.capacity() * size_of::<(u64, u64, u64)>();
+    let chunk_bounds_bytes = needs.chunk_bounds.capacity() * size_of::<(u64, u64)>();
+    let small_primes_bytes = size_of_val(small_primes);
+    eprintln!(
+        "[mem-profile] StreamNeeds breakdown: lucas_small={:.2} MiB ({} keys/primes) \
+         padic_small={:.2} MiB ({} keys/primes) cofactor={:.2} MiB ({} entries) \
+         chunk_bounds={:.2} MiB ({} chunks) small_primes={:.2} MiB ({} primes)",
+        lucas_bytes as f64 / (1024.0 * 1024.0),
+        needs.lucas_small.len(),
+        padic_bytes as f64 / (1024.0 * 1024.0),
+        needs.padic_small.len(),
+        cofactor_bytes as f64 / (1024.0 * 1024.0),
+        needs.cofactor.len(),
+        chunk_bounds_bytes as f64 / (1024.0 * 1024.0),
+        needs.chunk_bounds.len(),
+        small_primes_bytes as f64 / (1024.0 * 1024.0),
+        small_primes.len(),
+    );
 }
 
 // ---------------------------------------------------------------------------------
@@ -1751,10 +1917,70 @@ mod tests {
         (main_items, lucas_need, padic_need)
     }
 
+    /// Expands a [`SideRanges`] map back into the explicit `(p,r) -> [(k,t)]` shape the
+    /// pre-streaming reference construction used (test-only: production code never
+    /// materialises this, that's the whole point of `SideRanges` — see its docs).
+    fn materialize_lucas(
+        need: &HashMap<u64, SideRanges>,
+        big_n: u64,
+        base: u64,
+    ) -> HashMap<(u64, u64), Vec<(u64, u64)>> {
+        let mut out: HashMap<(u64, u64), Vec<(u64, u64)>> = HashMap::new();
+        for (&p, ranges) in need {
+            for (is_high, range) in [(false, ranges.lo), (true, ranges.hi)] {
+                let Some((t_min, t_max)) = range else {
+                    continue;
+                };
+                let r = t_min % p;
+                let mut t = t_min;
+                loop {
+                    let k = if is_high { big_n - 1 - t } else { t };
+                    if !(base + 2 * k).is_multiple_of(p * p) {
+                        out.entry((p, r)).or_default().push((k, t));
+                    }
+                    if t == t_max {
+                        break;
+                    }
+                    t += p;
+                }
+            }
+        }
+        out
+    }
+
+    /// Same idea for `padic_small`, recomputing each member's exact `e` the same way
+    /// [`padic_consumers`] does (step `p^2`, not `p`).
+    fn materialize_padic(
+        need: &HashMap<u64, SideRanges>,
+        big_n: u64,
+        base: u64,
+    ) -> HashMap<u64, Vec<(u64, u64, u32)>> {
+        let mut out: HashMap<u64, Vec<(u64, u64, u32)>> = HashMap::new();
+        for (&p, ranges) in need {
+            let step = p * p;
+            for (is_high, range) in [(false, ranges.lo), (true, ranges.hi)] {
+                let Some((t_min, t_max)) = range else {
+                    continue;
+                };
+                let mut t = t_min;
+                loop {
+                    let k = if is_high { big_n - 1 - t } else { t };
+                    let e = padic_valuation(base, k, p);
+                    out.entry(p).or_default().push((k, t, e));
+                    if t == t_max {
+                        break;
+                    }
+                    t += step;
+                }
+            }
+        }
+        out
+    }
+
     /// The new streaming construction, gathering every chunk's Main items (regenerated exactly
     /// as [`art_chunk_by_range`] would) plus the small-prime and (regrouped) cofactor Lucas
-    /// needs and the p-adic needs, into the same shape [`reference_construction`] returns, so
-    /// the two can be compared directly.
+    /// needs and the p-adic needs, into the same shape [`reference_construction`] returns (via
+    /// [`materialize_lucas`]/[`materialize_padic`]), so the two can be compared directly.
     fn streamed_construction(big_m: u64, big_n: u64, mem_bits: u64) -> ConstructionResult {
         let base = 2 * big_m * big_n + 1;
         let m_max = base + 2 * (big_n - 1);
@@ -1778,11 +2004,12 @@ mod tests {
             }
         }
 
-        let mut combined_lucas = needs.lucas_small;
+        let mut combined_lucas = materialize_lucas(&needs.lucas_small, big_n, base);
         for (p, k, t) in needs.cofactor {
             combined_lucas.entry((p, t % p)).or_default().push((k, t));
         }
-        (main_items, combined_lucas, needs.padic_small)
+        let padic = materialize_padic(&needs.padic_small, big_n, base);
+        (main_items, combined_lucas, padic)
     }
 
     #[test]

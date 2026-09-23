@@ -4,6 +4,7 @@ pub mod config;
 pub mod job;
 pub mod known;
 pub mod log;
+pub mod mem_profile;
 pub mod nthdigit;
 pub mod nthdigit2;
 pub mod plan;
