@@ -1,0 +1,10 @@
+n= 160000 m_bits=    256 M=  120 N= 56854 err=nan tB=   0.96 tC=   10.65 art=   9.19 luc= 0.37 swp= 0.83 chunks= 2897 leaf=   36656294 sweep= 3408342 peak~2448
+n= 160000 m_bits=    512 M=  120 N= 56854 err=nan tB=   0.90 tC=    6.34 art=   4.78 luc= 0.37 swp= 0.89 chunks= 1475 leaf=   18718171 sweep= 3408342 peak~5210
+n= 160000 m_bits=   1024 M=  120 N= 56854 err=nan tB=   0.94 tC=    4.50 art=   2.79 luc= 0.42 swp= 0.96 chunks=  744 leaf=    9479687 sweep= 3408342 peak~11198
+n= 160000 m_bits=   2048 M=  120 N= 56854 err=nan tB=   1.01 tC=    3.20 art=   1.62 luc= 0.39 swp= 0.86 chunks=  374 leaf=    4818965 sweep= 3408342 peak~24096
+n= 160000 m_bits=   4096 M=  120 N= 56854 err=nan tB=   0.91 tC=    2.65 art=   1.09 luc= 0.38 swp= 0.89 chunks=  188 leaf=    2484817 sweep= 3408342 peak~51987
+n= 160000 m_bits=   8192 M=  120 N= 56854 err=nan tB=   0.88 tC=    2.22 art=   0.74 luc= 0.37 swp= 0.84 chunks=   94 leaf=    1300135 sweep= 3408342 peak~111300
+n= 160000 m_bits=  16384 M=  120 N= 56854 err=nan tB=   0.92 tC=    2.26 art=   0.63 luc= 0.40 swp= 0.93 chunks=   47 leaf=     716886 sweep= 3408342 peak~238275
+n= 160000 m_bits=  32768 M=  120 N= 56854 err=nan tB=   0.94 tC=    1.96 art=   0.47 luc= 0.37 swp= 0.83 chunks=   24 leaf=     445901 sweep= 3408342 peak~507936
+n= 160000 m_bits=  65536 M=  120 N= 56854 err=nan tB=   0.88 tC=    1.95 art=   0.41 luc= 0.37 swp= 0.88 chunks=   12 leaf=     303507 sweep= 3408342 peak~1023536
+n= 160000 m_bits= 131072 M=  120 N= 56854 err=nan tB=   0.94 tC=    1.96 art=   0.43 luc= 0.39 swp= 0.86 chunks=    6 leaf=     238757 sweep= 3408342 peak~2174130

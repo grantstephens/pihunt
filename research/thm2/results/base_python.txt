@@ -1,0 +1,5 @@
+n=   1000 m_bits=    420 M=   10 N=   584 err=nan tB=   0.00 tC=    0.02 art=   0.01 luc= 0.00 swp= 0.00 chunks=   14 leaf=       2376 sweep=    1944 peak~4100 | thm1 tC=0.07s ops=539038 agree=True
+n=   2000 m_bits=    594 M=   14 N=  1070 err=nan tB=   0.01 tC=    0.07 art=   0.03 luc= 0.01 swp= 0.00 chunks=   19 leaf=       5614 sweep=    4546 peak~6140 | thm1 tC=0.27s ops=1879671 agree=True
+n=   4000 m_bits=    840 M=   20 N=  1972 err=nan tB=   0.01 tC=    0.07 art=   0.03 luc= 0.02 swp= 0.01 chunks=   27 leaf=      14568 sweep=   10098 peak~9064 | thm1 tC=1.08s ops=6584132 agree=True
+n=   8000 m_bits=   1188 M=   26 N=  3728 err=nan tB=   0.01 tC=    0.06 art=   0.03 luc= 0.02 swp= 0.01 chunks=   36 leaf=      34329 sweep=   27969 peak~12815 | thm1 tC=1.65s ops=24210185 agree=True
+n=  16000 m_bits=   1680 M=   38 N=  6918 err=nan tB=   0.04 tC=    0.12 art=   0.05 luc= 0.03 swp= 0.02 chunks=   50 leaf=      86502 sweep=   65698 peak~19380 | thm1 tC=6.36s ops=85369299 agree=True
