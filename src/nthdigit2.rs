@@ -90,7 +90,8 @@
 //! argument said the *only* remaining `O(N)` piece was `cofactor` — but `cofactor` measures only
 //! tens of MiB at these `n` (see below), nowhere near 447 MiB. Profiling with `--features
 //! mem-profile` (a counting global allocator plus an explicit per-structure breakdown, both in
-//! [`crate::mem_profile`] and [`log_needs_sizes`]) at `n = 1e6`/`3e6` found two real culprits,
+//! [`crate::mem_profile`] and `log_needs_sizes`, feature-gated so not always in scope) at
+//! `n = 1e6`/`3e6` found two real culprits,
 //! **neither of them `cofactor`**:
 //!
 //! 1. **The actual dominant term**, by a wide margin: [`PadicBinom`]'s `memo_s`/`memo_c` were
