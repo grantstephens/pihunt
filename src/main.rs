@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use pihunt::basis::{Columns, Extra, Shape};
 use pihunt::log::{Kind, Record};
 use pihunt::report::{describe, formula};
@@ -16,6 +16,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// Which n-th-digit algorithm to use. Default is `Thm1` (Gourdon Theorem 1, `O(log² n)`
+/// memory, `O(n²)`-ish time): it's the one with the deep test history (MPFR-verified through
+/// 10^7 in `docs/nthdigit.md`) and no O(n)-sized bookkeeping. `Thm2` (Theorem 2, the chunked
+/// remainder-tree algorithm in `docs/nthdigit-theorem2.md`) wins on speed from roughly n >=
+/// 4e4 (see that doc's benchmark table) but its bookkeeping (factor table, ART item list) is
+/// still `O(N)` words rather than the fully `O(mem_bits)` the theorem promises — see
+/// `src/nthdigit2.rs` module docs. Making the user opt in with `--method thm2` keeps existing
+/// callers' memory/behavior unchanged and treats the new algorithm as what it is: faster, but
+/// newer and with a documented memory caveat.
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum Method {
+    Thm1,
+    Thm2,
 }
 
 #[derive(Subcommand)]
@@ -47,6 +62,14 @@ enum Cmd {
         pos: u64,
         #[arg(long, default_value_t = 10)]
         count: usize,
+        /// Which algorithm to use; see [`Method`].
+        #[arg(long, value_enum, default_value_t = Method::Thm1)]
+        method: Method,
+        /// Theorem 2 only: ART chunk modulus size in bits (memory budget). Default scales as
+        /// `~4*sqrt(pos)` decimal digits (`pihunt::nthdigit2::default_mem_bits`), the "headline"
+        /// `m ∝ √n` case from `docs/nthdigit-theorem2.md` §6.1.
+        #[arg(long)]
+        mem: Option<u64>,
     },
     /// Stream decimal digits of pi forever, in independently-computed blocks (memory never
     /// grows), printing each block to stdout as soon as it's ready.
@@ -58,6 +81,12 @@ enum Cmd {
         /// Stop after this many blocks. Hidden: for tests only.
         #[arg(long, hide = true)]
         blocks: Option<u64>,
+        /// Which algorithm to use; see [`Method`].
+        #[arg(long, value_enum, default_value_t = Method::Thm1)]
+        method: Method,
+        /// Theorem 2 only: ART chunk modulus size in bits. See `digit --mem`.
+        #[arg(long)]
+        mem: Option<u64>,
     },
 }
 
@@ -67,12 +96,19 @@ fn main() -> ExitCode {
         Cmd::Plan { batch, shard } => show_plan(batch, shard),
         Cmd::Verify { results } => reverify(results),
         Cmd::Report { results } => write_report(results),
-        Cmd::Digit { pos, count } => digit_cmd(pos, count),
+        Cmd::Digit {
+            pos,
+            count,
+            method,
+            mem,
+        } => digit_cmd(pos, count, method, mem),
         Cmd::Stream {
             from,
             block,
             blocks,
-        } => stream_cmd(from, block, blocks),
+            method,
+            mem,
+        } => stream_cmd(from, block, blocks, method, mem),
     };
     result.unwrap_or_else(|e| {
         eprintln!("error: {e}");
@@ -246,22 +282,40 @@ fn peak_rss_kb() -> Option<u64> {
     })
 }
 
-fn digit_cmd(pos: u64, count: usize) -> Result<ExitCode, String> {
+/// Computes `count` digits at 0-based position `n` with the requested method. `mem` (bits) is
+/// only meaningful for `Thm2`; `None` picks `pihunt::nthdigit2::default_mem_bits(n)`.
+fn digits_with(method: Method, n: u64, count: usize, mem: Option<u64>) -> String {
+    match method {
+        Method::Thm1 => pihunt::nthdigit::digits(n, count),
+        Method::Thm2 => {
+            let mem_bits = mem.unwrap_or_else(|| pihunt::nthdigit2::default_mem_bits(n.max(1)));
+            pihunt::nthdigit2::digits(n, count, mem_bits)
+        }
+    }
+}
+
+fn digit_cmd(pos: u64, count: usize, method: Method, mem: Option<u64>) -> Result<ExitCode, String> {
     if pos == 0 {
         return Err("position is 1-based; use pos >= 1".to_string());
     }
     let start = std::time::Instant::now();
-    let s = pihunt::nthdigit::digits(pos - 1, count);
+    let s = digits_with(method, pos - 1, count, mem);
     let ms = start.elapsed().as_millis();
     match peak_rss_kb() {
-        Some(kb) => eprintln!("digit {pos} (+{count}): {ms} ms, peak RSS {kb} KiB"),
-        None => eprintln!("digit {pos} (+{count}): {ms} ms"),
+        Some(kb) => eprintln!("digit {pos} (+{count}, {method:?}): {ms} ms, peak RSS {kb} KiB"),
+        None => eprintln!("digit {pos} (+{count}, {method:?}): {ms} ms"),
     }
     println!("{s}");
     Ok(ExitCode::SUCCESS)
 }
 
-fn stream_cmd(from: u64, block: usize, blocks: Option<u64>) -> Result<ExitCode, String> {
+fn stream_cmd(
+    from: u64,
+    block: usize,
+    blocks: Option<u64>,
+    method: Method,
+    mem: Option<u64>,
+) -> Result<ExitCode, String> {
     use std::io::Write;
     if from == 0 {
         return Err("position is 1-based; use --from >= 1".to_string());
@@ -273,7 +327,7 @@ fn stream_cmd(from: u64, block: usize, blocks: Option<u64>) -> Result<ExitCode, 
     let mut done = 0u64;
     loop {
         let start = std::time::Instant::now();
-        let s = pihunt::nthdigit::digits(pos - 1, block);
+        let s = digits_with(method, pos - 1, block, mem);
         println!("{s}");
         std::io::stdout().flush().map_err(|e| e.to_string())?;
         let ms = start.elapsed().as_millis();

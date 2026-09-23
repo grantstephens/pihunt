@@ -5,6 +5,7 @@ pub mod job;
 pub mod known;
 pub mod log;
 pub mod nthdigit;
+pub mod nthdigit2;
 pub mod plan;
 pub mod pslq;
 pub mod reduce;

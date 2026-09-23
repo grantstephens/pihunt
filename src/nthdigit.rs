@@ -149,7 +149,7 @@ pub fn powmod(mut base: u64, mut exp: u64, m: u64) -> u64 {
 /// Modular inverse of `a` mod `m` (which must be coprime to `m`), via the extended
 /// Euclidean algorithm on `i128` (large enough to hold every intermediate for `u64` inputs
 /// without overflow).
-fn mod_inverse(a: u64, m: u64) -> u64 {
+pub(crate) fn mod_inverse(a: u64, m: u64) -> u64 {
     fn ext_gcd(a: i128, b: i128) -> (i128, i128, i128) {
         if b == 0 {
             (a, 1, 0)
@@ -300,7 +300,7 @@ pub fn sum_binomials_mod(big_n: u64, k: u64, m: u64) -> u64 {
 // ---------------------------------------------------------------------------------
 
 #[inline]
-fn signed(term: u128, k: u64) -> u128 {
+pub(crate) fn signed(term: u128, k: u64) -> u128 {
     if k.is_multiple_of(2) {
         term
     } else {
@@ -308,7 +308,7 @@ fn signed(term: u128, k: u64) -> u128 {
     }
 }
 
-fn b_sum(n: u64, terms: u64) -> u128 {
+pub(crate) fn b_sum(n: u64, terms: u64) -> u128 {
     use rayon::prelude::*;
     (0..terms)
         .into_par_iter()
@@ -358,7 +358,7 @@ pub fn frac_10n_pi(n: u64, n0: u32) -> u128 {
 /// "multiply by the base, take the integer part" digit-extraction loop, done exactly in
 /// `u128` by splitting into 64-bit halves so the intermediate `x * 10` (up to 132 bits)
 /// never overflows.
-fn next_digit(x: &mut u128) -> u8 {
+pub(crate) fn next_digit(x: &mut u128) -> u8 {
     let x_hi = (*x >> 64) as u64;
     let x_lo = *x as u64;
     let lo_prod = (x_lo as u128) * 10;
@@ -371,7 +371,7 @@ fn next_digit(x: &mut u128) -> u8 {
     digit
 }
 
-fn extract_digits(mut x: u128, count: usize) -> String {
+pub(crate) fn extract_digits(mut x: u128, count: usize) -> String {
     let mut s = String::with_capacity(count);
     for _ in 0..count {
         s.push((b'0' + next_digit(&mut x)) as char);
@@ -383,7 +383,7 @@ fn extract_digits(mut x: u128, count: usize) -> String {
 /// `frac_10n_pi`: the series truncation (`< 10^-n0`, Gourdon's Proposition 1, rounded up)
 /// plus one ulp of fixed-point rounding for each of the `terms` accumulated fractions
 /// (each is floored once, then added or subtracted exactly).
-fn error_units(n0: u32, terms: u64) -> u128 {
+pub(crate) fn error_units(n0: u32, terms: u64) -> u128 {
     let num = Integer::from(1) << 128u32;
     let den = Integer::from(10).pow(n0);
     let mut q = Integer::from(&num / &den);
@@ -399,14 +399,14 @@ fn error_units(n0: u32, terms: u64) -> u128 {
 /// are ~2^45 terms by n ~ 10^9 (~10^-25), so a truncation bound much below 10^-24 can't be
 /// certified anyway. `error_units` still accounts for the rounding exactly; this only stops
 /// the guard-doubling loop from chasing precision the accumulator doesn't have.
-const MAX_N0: u32 = 24;
+pub(crate) const MAX_N0: u32 = 24;
 
 /// Most digits one evaluation hands out; longer requests are split (see [`digits`]).
-const CHUNK: usize = 16;
+pub(crate) const CHUNK: usize = 16;
 
 /// Below this position, just ask MPFR for π directly — it's cheap there, and it sidesteps
 /// [`Params::new`]'s `N <= n + 2` precondition for small `n`.
-const SMALL_N_THRESHOLD: u64 = 2000;
+pub(crate) const SMALL_N_THRESHOLD: u64 = 2000;
 
 /// `count` decimal digits of π at positions `n+1 ..= n+count` after the decimal point
 /// (position 1 is the '1' in 3.14159...).
@@ -452,7 +452,7 @@ pub fn digits(n: u64, count: usize) -> String {
 
 /// Computes `count` digits of π at position `n+1..=n+count` directly with MPFR (cheap for
 /// small `n`, used as the fallback in [`digits`]).
-fn digits_via_mpfr(n: u64, count: usize) -> String {
+pub(crate) fn digits_via_mpfr(n: u64, count: usize) -> String {
     let guard: u64 = 20;
     let total = n + count as u64 + guard;
     let bits = crate::pslq::digits_to_bits(total as u32) + 8;

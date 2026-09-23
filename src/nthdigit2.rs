@@ -1,0 +1,1393 @@
+//! Xavier Gourdon's unpublished "Theorem 2": decimal digits of π with `O(m)`-bit memory
+//! (`m` a tunable budget), trading memory for time against [`crate::nthdigit`]'s Theorem 1
+//! (`O(log² n)` memory, `O(n²)` time). See `docs/nthdigit-theorem2.md` for the full
+//! reconstruction, proofs and prototype measurements this module ports to Rust (the
+//! reference implementation is `research/thm2/thm2.py`, validated against MPFR to
+//! `n = 1.28e6`). Section numbers cited below (`§4.2` etc.) refer to that doc.
+//!
+//! # The formula (unchanged from Theorem 1, doc §2)
+//!
+//! `frac(10^n π) ≈ frac(B - C)` (Gourdon Proposition 1, error `< 10^-n0`):
+//!
+//! ```text
+//! B = Σ_{k<(M+1)N} (-1)^k (4·10^n mod (2k+1)) / (2k+1)
+//! C = Σ_{k<N}      (-1)^k (X·s_k mod m_k) / m_k,   X = 5^(N-2)·10^(n-N+2), m_k = 2MN+2k+1
+//! s_k = Σ_{j<=k} C(N,j)
+//! ```
+//!
+//! `B` is computed exactly as in Theorem 1 ([`crate::nthdigit::b_sum`], reused verbatim: the
+//! formula, the fixed-point encoding and the rayon parallelisation are all independent of how
+//! `C` gets computed). Theorem 2 replaces Theorem 1's `O(k)`-per-term Algorithm 2 for `s_k mod
+//! m_k` with a **chunked accumulating remainder tree** (doc §4.4): binary splitting of the
+//! recurrence `P_t = N!/(N-t)!, D_t = t!, T_t = t!·s_t` on numbers of `~mem_bits` bits, so the
+//! per-target cost drops from `Θ(t)` to `Θ(polylog(m)/m)` amortised. `M` is re-balanced against
+//! `mem_bits` (doc §5.4) instead of Theorem 1's `M ≈ n/log³n`, since a smaller `M` (hence
+//! larger `N`) is cheaper once `C` itself got cheaper.
+//!
+//! # Why every "big number" in this module fits in a `u64` except the ART state
+//!
+//! `m_k = 2MN + 2k + 1` is bounded by `O(n^1.5/log n)` for `mem_bits ∝ √n` (the headline case;
+//! see doc §5.4), which stays far below `2^64` for every `n` this implementation can run in
+//! practice (as with Theorem 1, this is an implicit domain limit shared with
+//! [`crate::nthdigit`]). So every individual modulus (`m_k`, or one of its prime-power parts
+//! `q`) fits in a `u64`, and all of Theorem 1's `u64` modular-arithmetic helpers
+//! ([`crate::nthdigit::mulmod`], `powmod`, `mod_inverse`, `frac_fixed_point`) are reused
+//! unchanged. The *only* place that needs `rug::Integer` bignums is the ART: the recurrence
+//! state `(P, T, D)` and the chunk modulus `Q = Π q` genuinely need `~mem_bits` bits, because
+//! that's the whole point (binary-splitting many small factors into one big exact product
+//! before reducing, doc §3 "obstacle 1").
+//!
+//! # Precision and certification
+//!
+//! Exactly as Theorem 1 (module docs on [`crate::nthdigit`]): each of the `(M+1)N` B-terms and
+//! every C-part partial-fraction contribution is stored as a `u128` fixed-point fraction via
+//! [`crate::nthdigit::frac_fixed_point`] (exact `floor(x·2^128/m)`, `< 1` ulp error), and
+//! accumulated with `wrapping_add`/`wrapping_sub` (exact arithmetic mod 1 on this encoding).
+//! Unlike Theorem 1, a single `k` in the C-part can contribute *more than one* rounded term
+//! (one per coprime prime-power part of `m_k`: the main ART part, plus one per small prime via
+//! Lucas or the p-adic recursion) — see [`c_part`], which counts every actual call to
+//! [`add_contribution`] and returns that exact count so [`error_units`][crate::nthdigit] gets
+//! charged the true number of roundings, not an estimate.
+//!
+//! # Memory: what's `O(mem_bits)` and what isn't (be honest, doc §7)
+//!
+//! The ART's bignum working set — the product tree and `(P,T,D)` state for one chunk, and one
+//! group's binary-splitting stack within it — is `O(mem_bits log(mem_bits))` bits, matching
+//! doc §5.1. **That part is real and is what's measured below.** What is *not* streamed, matching
+//! the prototype's own stated limitation (doc §7): the factorisation table for all `m_k`
+//! (`k < N`) and the sorted ART item list are held in full, `O(N)` words, before any chunk
+//! runs. `N` is much smaller than `n` (doc §5.4: `N = Θ(n/log(n/m))`), but for large `n` this
+//! `O(N)`-word bookkeeping — not the `O(mem_bits)` bignum arithmetic — is what dominates peak
+//! RSS in this implementation. A fully streaming version would factor `m_k` chunk-by-chunk with
+//! a segmented sieve restricted to that chunk's numeric window (doc §4.4, last paragraph)
+//! instead of sieving the whole `[0, N)` range up front; that's routine but not implemented
+//! here (same caveat the prototype records). The p-adic tables (`O(p)` words per prime, doc
+//! §5.2) are built and dropped one prime at a time, so their peak is `O(max p)` over the primes
+//! actually used, not `O(Σp)`.
+
+use crate::nthdigit::{
+    self, MAX_N0, extract_digits, frac_fixed_point, mod_inverse, mulmod, powmod, signed,
+};
+use rug::Integer;
+use std::collections::HashMap;
+
+/// Cache of Lucas' theorem's per-digit binomial row + prefix sums, keyed `(prime, digit
+/// position)` (valid as long as `N` doesn't change between calls — see [`lucas_s`]).
+type LucasRowCache = HashMap<(u64, u32), (Vec<u64>, Vec<u64>)>;
+/// `(s_r, C(N,r)) mod p`, keyed `(p, r)`: what a Lucas ART item resolves to.
+type LucasVal = (u64, u64);
+/// One resolved Lucas leaf, ready to feed into [`lucas_consumers`].
+type LucasLeaf = ((u64, u64), LucasVal);
+
+// ---------------------------------------------------------------------------------
+// Parameters
+// ---------------------------------------------------------------------------------
+
+/// `M`, `N` for one Theorem-2 run at memory budget `mem_bits` (doc §4, §5.4).
+///
+/// Unlike Theorem 1's `M ≈ n/log³n` (chosen to make the `O(k)`-per-term `B`/`C` balance when
+/// `C` costs `Θ(k)`), Theorem 2 makes `C` cost roughly `Θ(N log n log²(mem_bits)/mem_bits)`
+/// (doc §5.1), so a *smaller* `M` (hence larger `N`, since `N ∝ 1/ln(2eM)`) is cheaper once
+/// `mem_bits` is large enough. We use the prototype's balancing heuristic
+/// (`research/thm2/thm2.py::run`), `M = max(4, 2·round(2n/mem_bits))`: `C`'s cost scales like
+/// `N²/mem_bits`, `B`'s like `M·N`, and `N ∝ n/M` to first order, so equalising them gives
+/// `M ∝ n/mem_bits` up to the slowly-varying log factors doc §5.4 spells out exactly. This
+/// coarser heuristic is what the prototype measured against MPFR up to `n = 1.28e6`; a tuned
+/// constant could shave a further constant factor but isn't needed for correctness.
+#[derive(Debug, Clone, Copy)]
+pub struct Params2 {
+    /// Degree parameter `M`. Always even, `>= 4`.
+    pub big_m: u64,
+    /// Degree parameter `N`. Always even, `<= n + 2`.
+    pub big_n: u64,
+    /// The memory budget this run was chosen for (bits of one ART chunk modulus).
+    pub mem_bits: u64,
+}
+
+impl Params2 {
+    /// Chooses `M` from `mem_bits`, then `N` exactly as [`crate::nthdigit::Params::new`] does
+    /// from `n`, `n0`, `M` (doc §2's `N = ⌈(n+n0+1)ln10/ln(2eM)⌉`, rounded up to even). Panics
+    /// under the same conditions as Theorem 1's `Params::new` (`N` would exceed `n+2`).
+    pub fn new(n: u64, n0: u32, mem_bits: u64) -> Self {
+        assert!(n >= 1, "n must be >= 1");
+        assert!(mem_bits >= 64, "mem_bits must be >= 64, got {mem_bits}");
+        let raw = ((2.0 * n as f64 / mem_bits as f64).round() as u64).max(1);
+        let mut big_m = 2 * raw;
+        if big_m < 4 {
+            big_m = 4;
+        }
+        let log_2em = (2.0 * std::f64::consts::E * big_m as f64).ln();
+        let raw_n = (((n + n0 as u64 + 1) as f64) * 10f64.ln() / log_2em).ceil();
+        let mut big_n = raw_n as u64;
+        if !big_n.is_multiple_of(2) {
+            big_n += 1;
+        }
+        if big_n < 2 {
+            big_n = 2;
+        }
+        assert!(
+            big_n <= n + 2,
+            "N={big_n} exceeds n+2={} for n={n}, n0={n0}, mem_bits={mem_bits}: n is too small \
+             for the requested precision; use the MPFR fallback instead",
+            n + 2
+        );
+        Params2 {
+            big_m,
+            big_n,
+            mem_bits,
+        }
+    }
+
+    /// `log10` of Gourdon's truncation bound `π/(2eM)^N` (doc §2), identical formula to
+    /// Theorem 1's [`crate::nthdigit::Params::error_bound_log10`].
+    pub fn error_bound_log10(&self) -> f64 {
+        let log_2em = (2.0 * std::f64::consts::E * self.big_m as f64).ln();
+        (std::f64::consts::PI.ln() - self.big_n as f64 * log_2em) / 10f64.ln()
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Sieve of Eratosthenes + segmented factoring of the m_k interval (doc §4.4, §5.3)
+// ---------------------------------------------------------------------------------
+
+/// All primes `<= x`, plain sieve of Eratosthenes. `x` is `O(sqrt(mem_bits-scaled N))` in
+/// every call site here, so this is cheap and its `O(x)`-bit memory is not the bottleneck.
+fn primes_upto(x: u64) -> Vec<u64> {
+    if x < 2 {
+        return Vec::new();
+    }
+    let x = x as usize;
+    let mut sieve = vec![true; x + 1];
+    sieve[0] = false;
+    sieve[1] = false;
+    let mut i = 2usize;
+    while i * i <= x {
+        if sieve[i] {
+            let mut j = i * i;
+            while j <= x {
+                sieve[j] = false;
+                j += i;
+            }
+        }
+        i += 1;
+    }
+    (0..=x as u64).filter(|&i| sieve[i as usize]).collect()
+}
+
+/// Complete factorisations of `m_k = 2MN + 2k + 1` for every `k < N`, via one segmented sieve
+/// pass over primes `<= sqrt(max m_k)` (doc §5.3: `O(N loglog N)` word ops total). Holds
+/// `O(N)` words (see module docs: this is the un-streamed part).
+fn factor_interval(big_m: u64, big_n: u64) -> Vec<Vec<(u64, u32)>> {
+    let base = 2 * big_m * big_n + 1;
+    let top = base + 2 * (big_n - 1);
+    let mut rem: Vec<u64> = (0..big_n).map(|k| base + 2 * k).collect();
+    let mut fac: Vec<Vec<(u64, u32)>> = vec![Vec::new(); big_n as usize];
+    let limit = (top as f64).sqrt() as u64 + 2;
+    for p in primes_upto(limit) {
+        if p == 2 {
+            continue; // every m_k is odd (base odd + even 2k)
+        }
+        let inv2 = mod_inverse(2 % p, p);
+        let base_mod_p = base % p;
+        let neg_base_mod_p = (p - base_mod_p) % p;
+        let mut k = mulmod(neg_base_mod_p, inv2, p);
+        while k < big_n {
+            let mut e = 0u32;
+            while rem[k as usize].is_multiple_of(p) {
+                rem[k as usize] /= p;
+                e += 1;
+            }
+            if e > 0 {
+                fac[k as usize].push((p, e));
+            }
+            k += p;
+        }
+    }
+    for k in 0..big_n as usize {
+        if rem[k] > 1 {
+            fac[k].push((rem[k], 1));
+        }
+    }
+    fac
+}
+
+// ---------------------------------------------------------------------------------
+// The recurrence and binary splitting (doc §4.2, §4.4)
+// ---------------------------------------------------------------------------------
+
+/// `(alpha, delta, tau)` for the recurrence block `(j1, j2]`: `P' = alpha*P`,
+/// `T' = delta*T + tau*P`, `D' = delta*D` (doc §4.2). Below `LEAF`, computed directly by the
+/// step recurrence `P <- (N-j+1)P; T <- jT + (N-j+1)P_old; D <- jD`; above it, split in half
+/// and composed via `(a1*a2, d1*d2, d2*t1 + t2*a1)` (standard binary-splitting composition).
+const LEAF: u64 = 24;
+
+fn bs(big_n: u64, j1: u64, j2: u64) -> (Integer, Integer, Integer) {
+    if j2 - j1 <= LEAF {
+        let (mut a, mut d, mut t) = (Integer::from(1), Integer::from(1), Integer::from(0));
+        for j in (j1 + 1)..=j2 {
+            let u = big_n - j + 1;
+            t = j * t + u * &a;
+            a *= u;
+            d *= j;
+        }
+        return (a, d, t);
+    }
+    let mid = (j1 + j2) >> 1;
+    let (a1, d1, t1) = bs(big_n, j1, mid);
+    let (a2, d2, t2) = bs(big_n, mid, j2);
+    let tau = Integer::from(&d2 * &t1) + Integer::from(&t2 * &a1);
+    (a1 * a2, d1 * d2, tau)
+}
+
+/// Applies steps `(j1, j2]` to `state` modulo `Q`, in groups sized so each group's binary
+/// splitting stays close to `bits(Q)` bits (doc §4.4 step 2/3: "groups of `g = m/log2 N`").
+fn advance(
+    big_n: u64,
+    state: (Integer, Integer, Integer),
+    j1: u64,
+    j2: u64,
+    q: &Integer,
+    lg_n: u32,
+) -> (Integer, Integer, Integer) {
+    if j2 <= j1 {
+        return state;
+    }
+    let qb = q.significant_bits().max(64) as u64;
+    let g = (qb / lg_n as u64).max(8);
+    let (mut p, mut t, mut d) = state;
+    let mut j = j1;
+    while j < j2 {
+        let e = (j + g).min(j2);
+        let (a, dd, tt) = bs(big_n, j, e);
+        let new_p = Integer::from(&a * &p) % q;
+        let new_t = (Integer::from(&dd * &t) + Integer::from(&tt * &p)) % q;
+        let new_d = Integer::from(&dd * &d) % q;
+        p = new_p;
+        t = new_t;
+        d = new_d;
+        j = e;
+    }
+    (p, t, d)
+}
+
+// ---------------------------------------------------------------------------------
+// ART items (doc §4.3, §4.4): partial-fraction parts of each m_k
+// ---------------------------------------------------------------------------------
+
+/// What an ART item's leaf result feeds into.
+#[derive(Clone, Copy, Debug)]
+enum Tag {
+    /// `m_k`'s "large primes" part (all `p > t_k`): result folds directly into the
+    /// accumulator via [`add_contribution`].
+    Main(u64),
+    /// A Lucas item shared by every `k` with `p || m_k` (exponent 1) and `t_k mod p == r`:
+    /// result is `(s_r, C(N,r)) mod p`, consumed later by [`lucas_consumers`].
+    Lucas(u64, u64),
+}
+
+struct Item {
+    /// Target `t` this item resolves the recurrence state at.
+    t: u64,
+    /// Modulus (fits `u64`, see module docs).
+    q: u64,
+    tag: Tag,
+}
+
+/// `t! mod m` used by the Lucas/p-adic identities is never computed directly; instead every
+/// part's contribution is folded in here: `(-1)^k * frac(X_k * s_mod_q * ((m_k/q)^-1 mod q) /
+/// q)`, the partial-fraction reassembly from doc §3 "obstacles 2/4". `s_mod_q` must already be
+/// `s_{t_k} mod q` (i.e. the *un-mirrored* value at the item's own target `t`); the `k != t`
+/// symmetry flip (doc §4.2 "Symmetry") happens inside.
+fn add_contribution(n: u64, big_n: u64, base: u64, k: u64, t: u64, q: u64, s_mod_q: u64) -> u128 {
+    let mut s = s_mod_q % q;
+    if k != t {
+        let two_n = powmod(2, big_n, q);
+        s = (two_n + q - s) % q;
+    }
+    let m_k = base + 2 * k;
+    let cofactor = (m_k / q) % q;
+    let a = mod_inverse(cofactor, q);
+    let e1 = big_n - 2;
+    let e2 = (n + 2) - big_n;
+    let pow5 = powmod(5, e1, q);
+    let pow10 = powmod(10, e2, q);
+    let xk = mulmod(pow5, pow10, q);
+    let y = mulmod(mulmod(xk, s, q), a, q);
+    signed(frac_fixed_point(y, q), k)
+}
+
+// ---------------------------------------------------------------------------------
+// Lucas' theorem (doc §4.3 "Lucas formula")
+// ---------------------------------------------------------------------------------
+
+/// `s_t mod p` from `s_r, C(N,r) mod p` (`r = t mod p`, from an ART item) via Lucas' theorem
+/// (doc §4.3). `cache` memoises, per prime `p`, the digit-`i` binomial row/prefix-sum table
+/// (`(p, i) -> (C(N_i, ·), prefix sums)`) shared by every `k` that needs prime `p`.
+fn lucas_s(big_n: u64, t: u64, p: u64, sr: u64, cr: u64, cache: &mut LucasRowCache) -> u64 {
+    let mut n_digits = Vec::new();
+    let mut t_digits = Vec::new();
+    let (mut x, mut y) = (big_n, t);
+    while x > 0 {
+        n_digits.push(x % p);
+        t_digits.push(y % p);
+        x /= p;
+        y /= p;
+    }
+    let depth = n_digits.len();
+    if depth == 0 {
+        // N == 0: s_t is trivially 0 or 1, handled by the t >= N shortcut upstream. Defensive.
+        return 0;
+    }
+    let mut pow2low = vec![1u64; depth + 1];
+    for i in 0..depth {
+        pow2low[i + 1] = mulmod(pow2low[i], powmod(2, n_digits[i], p), p);
+    }
+    let mut hi_prod = 1u64;
+    let mut acc = 0u64;
+    for i in (0..depth).rev() {
+        let (g, cb) = if i == 0 {
+            ((sr + p - cr % p) % p, cr % p)
+        } else {
+            let ni = n_digits[i];
+            let (cs, pref) = cache.entry((p, i as u32)).or_insert_with(|| {
+                let mut c = 1u64;
+                let mut cs = Vec::with_capacity(ni as usize + 1);
+                let mut pref = vec![0u64];
+                for yv in 0..=ni {
+                    if yv > 0 {
+                        let inv_y = mod_inverse(yv, p);
+                        c = mulmod(mulmod(c, (ni - yv + 1) % p, p), inv_y, p);
+                    }
+                    cs.push(c);
+                    let last = *pref.last().unwrap();
+                    pref.push((last + c) % p);
+                }
+                (cs, pref)
+            });
+            let ti = t_digits[i] as usize;
+            let g = pref[ti.min(cs.len())];
+            let cb = if ti < cs.len() { cs[ti] } else { 0 };
+            (g, cb)
+        };
+        acc = (acc + mulmod(mulmod(hi_prod, g, p), pow2low[i], p)) % p;
+        hi_prod = mulmod(hi_prod, cb, p);
+        if hi_prod == 0 {
+            break;
+        }
+    }
+    (acc + hi_prod) % p
+}
+
+// ---------------------------------------------------------------------------------
+// p-adic Lucas recursion for p^e, e >= 2 (doc §4.3 "p-adic recursion")
+// ---------------------------------------------------------------------------------
+
+/// `s_t(N) mod p^e` and `C(N,t) mod p^e` for a fixed prime `p`, via the recursion
+/// `(1+x)^N = (1+x)^N0 · ((1+x^p) + p·g(x))^K` (`N = pK+N0`, doc §4.3). Builds `O(p)`-word
+/// tables (`gp`: powers of `g` up to `g^(emax-1)`) once per prime; callers build one of these
+/// per prime and drop it before moving to the next, so peak memory is `O(max p)` over the
+/// primes actually used (doc §5.2), not `O(Σp)`.
+struct PadicBinom {
+    p: u64,
+    pow_p: Vec<u64>,                                 // pow_p[i] = p^i, i <= emax
+    gp: Vec<Vec<u64>>, // gp[i] = coefficients of g^i mod p^emax, i < emax
+    rows: HashMap<(u64, u64), (Vec<u64>, Vec<u64>)>, // (N0, mod) -> (coeffs, prefix sums)
+    memo_s: HashMap<(u64, i64, u32), u64>,
+    memo_c: HashMap<(u64, i64, u32), u64>,
+}
+
+impl PadicBinom {
+    fn new(p: u64, emax: u32) -> Self {
+        let mut pow_p = vec![1u64; emax as usize + 1];
+        for i in 1..=emax as usize {
+            pow_p[i] = pow_p[i - 1] * p;
+        }
+        let pe = pow_p[emax as usize];
+        // g[i] = C(p-1, i-1) / i mod pe, for i in 1..p, via the running-product trick.
+        let mut g = vec![0u64; p as usize];
+        let mut c = 1u64 % pe.max(1);
+        for i in 1..p {
+            let inv_i = mod_inverse(i % pe, pe);
+            g[i as usize] = mulmod(c, inv_i, pe);
+            c = mulmod(mulmod(c, (p - i) % pe, pe), inv_i, pe);
+        }
+        let mut gp: Vec<Vec<u64>> = vec![vec![1u64]];
+        for _ in 1..emax {
+            let prev = gp.last().unwrap();
+            let mut nxt = vec![0u64; prev.len() + p as usize - 1];
+            for (a_, &x) in prev.iter().enumerate() {
+                if x == 0 {
+                    continue;
+                }
+                for (b_, &gb) in g.iter().enumerate().skip(1) {
+                    if gb == 0 {
+                        continue;
+                    }
+                    let idx = a_ + b_;
+                    nxt[idx] = (nxt[idx] + mulmod(x, gb, pe)) % pe;
+                }
+            }
+            gp.push(nxt);
+        }
+        PadicBinom {
+            p,
+            pow_p,
+            gp,
+            rows: HashMap::new(),
+            memo_s: HashMap::new(),
+            memo_c: HashMap::new(),
+        }
+    }
+
+    /// Coefficients and prefix sums of `(1+x)^N0` mod `modulus`, `N0 < p`. Memoised per
+    /// `(N0, modulus)` pair (several `modulus = p^(e-i)` values are used across recursion
+    /// levels).
+    fn row(&mut self, n0: u64, modulus: u64) -> &(Vec<u64>, Vec<u64>) {
+        self.rows.entry((n0, modulus)).or_insert_with(|| {
+            let mut a = Vec::with_capacity(n0 as usize + 1);
+            let mut c = 1u64 % modulus.max(1);
+            for y in 0..=n0 {
+                if y > 0 {
+                    let inv_y = mod_inverse(y % modulus, modulus);
+                    c = mulmod(mulmod(c, (n0 - y + 1) % modulus, modulus), inv_y, modulus);
+                }
+                a.push(c);
+            }
+            let mut pref = Vec::with_capacity(a.len());
+            let mut s = 0u64;
+            for &v in &a {
+                s = (s + v) % modulus;
+                pref.push(s);
+            }
+            (a, pref)
+        })
+    }
+
+    /// Coefficient `u` (or, if `prefix`, the prefix sum up to `u`) of `h_i = (1+x)^N0 * g^i`,
+    /// mod `modulus`.
+    fn h(&mut self, n0: u64, i: usize, u: u64, modulus: u64, prefix: bool) -> u64 {
+        let gi_len;
+        {
+            let gi = &self.gp[i];
+            gi_len = gi.len();
+        }
+        let (a, pref) = self.row(n0, modulus).clone(); // small (<= p entries); clone avoids
+        // holding an immutable borrow of self.rows across the mutable gp access below.
+        let gi = &self.gp[i];
+        let lo = if prefix { 0 } else { u.saturating_sub(n0) };
+        let hi_z = u.min(gi_len as u64 - 1);
+        let mut tot = 0u128;
+        let mut z = lo;
+        while z <= hi_z {
+            let gz = gi[z as usize];
+            if gz != 0 {
+                let w = u - z;
+                let term = if prefix {
+                    gz as u128 * a_prefix_at(&pref, w, n0) as u128
+                } else {
+                    gz as u128 * a[w as usize] as u128
+                };
+                tot += term;
+            }
+            z += 1;
+        }
+        (tot % modulus as u128) as u64
+    }
+
+    fn s(&mut self, big_n: u64, t: i64, e: u32) -> u64 {
+        if e == 0 || t < 0 {
+            return 0;
+        }
+        let modulus = self.pow_p[e as usize];
+        if t as u64 >= big_n {
+            return powmod(2, big_n, modulus);
+        }
+        let t = t as u64;
+        if let Some(&v) = self.memo_s.get(&(big_n, t as i64, e)) {
+            return v;
+        }
+        let p = self.p;
+        let r = if big_n < p {
+            self.row(big_n, modulus).1[t as usize]
+        } else {
+            let (k, n0) = (big_n / p, big_n % p);
+            let (tt, rr) = (t / p, t % p);
+            let mut r = 0u128;
+            for i in 0..e {
+                if k < i as u64 {
+                    break;
+                }
+                let coef = Integer::from(k).binomial(i) * Integer::from(self.pow_p[i as usize]);
+                let coef_mod = Integer::from(&coef % modulus).to_u64().unwrap();
+                if coef_mod == 0 {
+                    continue;
+                }
+                let m2 = self.pow_p[(e - i) as usize];
+                let full = mulmod(
+                    powmod(2, n0, m2),
+                    self.gp[i as usize]
+                        .iter()
+                        .fold(0u64, |acc, &v| (acc + v) % m2),
+                    m2,
+                );
+                let mut part = mulmod(
+                    full,
+                    self.s(k - i as u64, tt as i64 - i as i64 - 1, e - i),
+                    m2,
+                ) as u128;
+                for d in 0..=i as u64 {
+                    let hv = self.h(n0, i as usize, d * p + rr, m2, true);
+                    let cv = self.c(k - i as u64, tt as i64 - d as i64, e - i);
+                    part += hv as u128 * cv as u128;
+                }
+                r += coef_mod as u128 * (part % m2 as u128);
+            }
+            (r % modulus as u128) as u64
+        };
+        self.memo_s.insert((big_n, t as i64, e), r);
+        r
+    }
+
+    fn c(&mut self, big_n: u64, t: i64, e: u32) -> u64 {
+        if e == 0 || t < 0 || t as u64 > big_n {
+            return 0;
+        }
+        let modulus = self.pow_p[e as usize];
+        let t = t as u64;
+        if let Some(&v) = self.memo_c.get(&(big_n, t as i64, e)) {
+            return v;
+        }
+        let p = self.p;
+        let r = if big_n < p {
+            self.row(big_n, modulus).0[t as usize]
+        } else {
+            let (k, n0) = (big_n / p, big_n % p);
+            let (tt, rr) = (t / p, t % p);
+            let mut r = 0u128;
+            for i in 0..e {
+                if k < i as u64 {
+                    break;
+                }
+                let coef = Integer::from(k).binomial(i) * Integer::from(self.pow_p[i as usize]);
+                let coef_mod = Integer::from(&coef % modulus).to_u64().unwrap();
+                if coef_mod == 0 {
+                    continue;
+                }
+                let m2 = self.pow_p[(e - i) as usize];
+                let mut part = 0u128;
+                for d in 0..=i as u64 {
+                    let hv = self.h(n0, i as usize, d * p + rr, m2, false);
+                    let cv = self.c(k - i as u64, tt as i64 - d as i64, e - i);
+                    part += hv as u128 * cv as u128;
+                }
+                r += coef_mod as u128 * (part % m2 as u128);
+            }
+            (r % modulus as u128) as u64
+        };
+        self.memo_c.insert((big_n, t as i64, e), r);
+        r
+    }
+}
+
+/// Prefix-sum lookup clamped to `N0` (the degree of the row), matching Python's
+/// `A[min(w, N0)]`: once past the polynomial's degree the prefix sum is constant.
+fn a_prefix_at(pref: &[u64], w: u64, n0: u64) -> u64 {
+    pref[(w.min(n0)) as usize]
+}
+
+// ---------------------------------------------------------------------------------
+// The C part: assembling items, running the ART, Lucas/p-adic consumers
+// ---------------------------------------------------------------------------------
+
+/// Sorted-by-target ART items are cut into chunks whose modulus product has `~mem_bits` bits
+/// (doc §4.4), each processed independently (they only share the *shape* of the recurrence,
+/// not any live state) so chunks can run in parallel.
+fn chunk_bounds(items: &[Item], mem_bits: u64) -> Vec<(usize, usize)> {
+    let mut bounds = Vec::new();
+    let mut i = 0usize;
+    while i < items.len() {
+        let mut bits = 0u64;
+        let mut j = i;
+        while j < items.len() && (bits < mem_bits || j == i) {
+            bits += 64 - items[j].q.leading_zeros() as u64;
+            j += 1;
+        }
+        bounds.push((i, j));
+        i = j;
+    }
+    bounds
+}
+
+/// Runs the ART over one chunk of items (already sorted by target `t`): builds the product
+/// tree of their moduli, advances the recurrence from step 0 to the chunk's first target mod
+/// `Q`, then descends the tree, reducing mod each subtree's modulus and re-advancing between
+/// siblings (doc §4.4 steps 1-4). `Main` leaves fold straight into the accumulator; `Lucas`
+/// leaves are returned for the caller to feed into [`lucas_consumers`].
+fn art_chunk(
+    n: u64,
+    big_n: u64,
+    base: u64,
+    items: &[Item],
+    lg_n: u32,
+) -> (u128, u64, Vec<LucasLeaf>) {
+    let l = items.len();
+    let mut tree: HashMap<(usize, usize), Integer> = HashMap::new();
+
+    fn build(
+        lo: usize,
+        hi: usize,
+        items: &[Item],
+        tree: &mut HashMap<(usize, usize), Integer>,
+    ) -> Integer {
+        if hi - lo == 1 {
+            let v = Integer::from(items[lo].q);
+            tree.insert((lo, hi), v.clone());
+            return v;
+        }
+        let mid = (lo + hi) / 2;
+        let l = build(lo, mid, items, tree);
+        let r = build(mid, hi, items, tree);
+        let prod = Integer::from(&l * &r);
+        tree.insert((lo, hi), prod.clone());
+        prod
+    }
+
+    let q_total = build(0, l, items, &mut tree);
+    let one = (Integer::from(1), Integer::from(1), Integer::from(1));
+    let x0 = advance(big_n, one, 0, items[0].t, &q_total, lg_n);
+
+    #[allow(clippy::too_many_arguments)]
+    fn rec(
+        n: u64,
+        big_n: u64,
+        base: u64,
+        lo: usize,
+        hi: usize,
+        x: (Integer, Integer, Integer),
+        items: &[Item],
+        tree: &HashMap<(usize, usize), Integer>,
+        lg_n: u32,
+        acc: &mut u128,
+        terms: &mut u64,
+        lucas_out: &mut Vec<LucasLeaf>,
+    ) {
+        if hi - lo == 1 {
+            let it = &items[lo];
+            let q_big = Integer::from(it.q);
+            let pm = Integer::from(&x.0 % &q_big).to_u64().unwrap();
+            let tm = Integer::from(&x.1 % &q_big).to_u64().unwrap();
+            let dm = Integer::from(&x.2 % &q_big).to_u64().unwrap();
+            match it.tag {
+                Tag::Main(k) => {
+                    let dinv = mod_inverse(dm, it.q);
+                    let s = mulmod(tm, dinv, it.q);
+                    *acc = acc.wrapping_add(add_contribution(n, big_n, base, k, it.t, it.q, s));
+                    *terms += 1;
+                }
+                Tag::Lucas(p, r) => {
+                    let dinv = mod_inverse(dm, it.q);
+                    let sr = mulmod(tm, dinv, it.q);
+                    let cr = mulmod(pm, dinv, it.q);
+                    lucas_out.push(((p, r), (sr, cr)));
+                }
+            }
+            return;
+        }
+        let mid = (lo + hi) / 2;
+        let ql = tree.get(&(lo, mid)).unwrap();
+        let qr = tree.get(&(mid, hi)).unwrap();
+        let xl = (
+            Integer::from(&x.0 % ql),
+            Integer::from(&x.1 % ql),
+            Integer::from(&x.2 % ql),
+        );
+        rec(
+            n, big_n, base, lo, mid, xl, items, tree, lg_n, acc, terms, lucas_out,
+        );
+        let xr0 = (
+            Integer::from(&x.0 % qr),
+            Integer::from(&x.1 % qr),
+            Integer::from(&x.2 % qr),
+        );
+        let xr = advance(big_n, xr0, items[lo].t, items[mid].t, qr, lg_n);
+        rec(
+            n, big_n, base, mid, hi, xr, items, tree, lg_n, acc, terms, lucas_out,
+        );
+    }
+
+    let mut acc = 0u128;
+    let mut terms = 0u64;
+    let mut lucas_out = Vec::new();
+    rec(
+        n,
+        big_n,
+        base,
+        0,
+        l,
+        x0,
+        items,
+        &tree,
+        lg_n,
+        &mut acc,
+        &mut terms,
+        &mut lucas_out,
+    );
+    (acc, terms, lucas_out)
+}
+
+/// Resolves every `k` that needed a Lucas item (prime `p`, exponent 1) from the `(s_r, C(N,r))`
+/// values the ART produced, and folds each into the accumulator.
+fn lucas_consumers(
+    n: u64,
+    big_n: u64,
+    base: u64,
+    lucas_need: &HashMap<(u64, u64), Vec<(u64, u64)>>,
+    lucas_val: &HashMap<(u64, u64), LucasVal>,
+) -> (u128, u64) {
+    use rayon::prelude::*;
+    lucas_need
+        .par_iter()
+        .map(|(&(p, _r), klist)| {
+            let (sr, cr) = lucas_val[&(p, _r)];
+            let mut cache = HashMap::new();
+            let mut acc = 0u128;
+            for &(k, t) in klist {
+                let s = lucas_s(big_n, t, p, sr, cr, &mut cache);
+                acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, p, s));
+            }
+            (acc, klist.len() as u64)
+        })
+        .reduce(
+            || (0u128, 0u64),
+            |(a1, c1), (a2, c2)| (a1.wrapping_add(a2), c1 + c2),
+        )
+}
+
+/// Resolves every `k` that needed the p-adic recursion (`p^e | m_k`, `e >= 2`), one
+/// [`PadicBinom`] table per prime (built and dropped independently, so peak memory across
+/// primes run in parallel is `threads * O(max p)`, not `O(Σp)`).
+fn padic_consumers(
+    n: u64,
+    big_n: u64,
+    base: u64,
+    padic_need: &HashMap<u64, Vec<(u64, u64, u32)>>,
+) -> (u128, u64) {
+    use rayon::prelude::*;
+    padic_need
+        .par_iter()
+        .map(|(&p, klist)| {
+            let emax = klist.iter().map(|&(_, _, e)| e).max().unwrap();
+            let mut pb = PadicBinom::new(p, emax);
+            let mut acc = 0u128;
+            for &(k, t, e) in klist {
+                let s = pb.s(big_n, t as i64, e);
+                let q = pb.pow_p[e as usize];
+                acc = acc.wrapping_add(add_contribution(n, big_n, base, k, t, q, s));
+            }
+            (acc, klist.len() as u64)
+        })
+        .reduce(
+            || (0u128, 0u64),
+            |(a1, c1), (a2, c2)| (a1.wrapping_add(a2), c1 + c2),
+        )
+}
+
+/// The full C part: builds ART/Lucas/p-adic items from `factor_interval`, runs the ART over
+/// `mem_bits`-sized chunks (in parallel across chunks via rayon), then the Lucas and p-adic
+/// consumer passes (in parallel across primes). Returns `(C, term_count)`, `term_count` being
+/// the exact number of rounded fixed-point terms folded in (for [`crate::nthdigit::error_units`]).
+fn c_part(n: u64, p: Params2) -> (u128, u64) {
+    use rayon::prelude::*;
+    let (big_m, big_n) = (p.big_m, p.big_n);
+    let base = 2 * big_m * big_n + 1;
+    let lg_n = 64 - big_n.leading_zeros();
+
+    let fac = factor_interval(big_m, big_n);
+    let mut items: Vec<Item> = Vec::new();
+    let mut lucas_need: HashMap<(u64, u64), Vec<(u64, u64)>> = HashMap::new();
+    let mut padic_need: HashMap<u64, Vec<(u64, u64, u32)>> = HashMap::new();
+
+    for k in 0..big_n {
+        let t = k.min(big_n - 1 - k);
+        let mut good = 1u64;
+        for &(pp, e) in &fac[k as usize] {
+            if pp > t {
+                good *= pp.pow(e);
+            } else if e == 1 {
+                let r = t % pp;
+                lucas_need.entry((pp, r)).or_default().push((k, t));
+            } else {
+                padic_need.entry(pp).or_default().push((k, t, e));
+            }
+        }
+        if good > 1 {
+            items.push(Item {
+                t,
+                q: good,
+                tag: Tag::Main(k),
+            });
+        }
+    }
+    for &(p_, r) in lucas_need.keys() {
+        items.push(Item {
+            t: r,
+            q: p_,
+            tag: Tag::Lucas(p_, r),
+        });
+    }
+    items.sort_by_key(|it| it.t);
+
+    let bounds = chunk_bounds(&items, p.mem_bits);
+    let (art_acc, art_terms, lucas_val): (u128, u64, HashMap<(u64, u64), LucasVal>) = bounds
+        .par_iter()
+        .map(|&(lo, hi)| art_chunk(n, big_n, base, &items[lo..hi], lg_n))
+        .fold(
+            || (0u128, 0u64, HashMap::new()),
+            |(mut acc, mut terms, mut map), (a, t, pairs)| {
+                acc = acc.wrapping_add(a);
+                terms += t;
+                for (k, v) in pairs {
+                    map.insert(k, v);
+                }
+                (acc, terms, map)
+            },
+        )
+        .reduce(
+            || (0u128, 0u64, HashMap::new()),
+            |(a1, t1, mut m1), (a2, t2, m2)| {
+                m1.extend(m2);
+                (a1.wrapping_add(a2), t1 + t2, m1)
+            },
+        );
+
+    let (lucas_acc, lucas_terms) = lucas_consumers(n, big_n, base, &lucas_need, &lucas_val);
+    let (padic_acc, padic_terms) = padic_consumers(n, big_n, base, &padic_need);
+
+    (
+        art_acc.wrapping_add(lucas_acc).wrapping_add(padic_acc),
+        art_terms + lucas_terms + padic_terms,
+    )
+}
+
+// ---------------------------------------------------------------------------------
+// frac(10^n pi) and digit extraction
+// ---------------------------------------------------------------------------------
+
+/// `frac(10^n π)` to within `10^-n0`, using Theorem 2 (chunked ART with `~mem_bits`-bit
+/// chunks) for the `C` part and Theorem 1's `B` part unchanged. Returns `(value, term_count)`
+/// so callers can certify with [`crate::nthdigit::error_units`] using the true rounding count.
+pub fn frac_10n_pi_m_with_terms(n: u64, n0: u32, mem_bits: u64) -> (u128, u64) {
+    let p = Params2::new(n, n0, mem_bits);
+    let b_terms = (p.big_m + 1) * p.big_n;
+    let (b, (c, c_terms)) = rayon::join(|| nthdigit::b_sum(n, b_terms), || c_part(n, p));
+    (b.wrapping_sub(c), b_terms + c_terms)
+}
+
+/// `frac(10^n π)` to within `10^-n0`, as a 128-bit fixed-point fraction (value `= x / 2^128`).
+/// Same fixed-point convention as [`crate::nthdigit::frac_10n_pi`]. See [`digits`] for
+/// certified digit extraction with an MPFR fallback for small `n`.
+pub fn frac_10n_pi_m(n: u64, n0: u32, mem_bits: u64) -> u128 {
+    frac_10n_pi_m_with_terms(n, n0, mem_bits).0
+}
+
+/// A sensible default memory budget: `mem_bits ≈ 4·sqrt(n)·log2(10)` bits, i.e. about `4·sqrt(n)`
+/// decimal digits — the "headline case" the reconstruction doc measures (`m ∝ √n` gives
+/// Gourdon's `n^1.5` special case, doc §6.1).
+pub fn default_mem_bits(n: u64) -> u64 {
+    let bits = 4.0 * (n as f64).sqrt() * 10f64.log2();
+    (bits.ceil() as u64).max(256)
+}
+
+/// `count` decimal digits of π at positions `n+1..=n+count`, computed with Theorem 2 at memory
+/// budget `mem_bits`. Mirrors [`crate::nthdigit::digits`] exactly (guard-doubling
+/// certification loop, MPFR fallback for small/ill-conditioned `n`, chunking beyond
+/// `MAX_N0`-certifiable length) — see that module's docs for the certification argument, which
+/// applies unchanged since both algorithms use the same fixed-point encoding and the same
+/// "one ulp per rounded term" error accounting (just with a different, exactly-counted, term
+/// count here).
+pub fn digits(n: u64, count: usize, mem_bits: u64) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    if count > nthdigit::CHUNK {
+        return (0..count)
+            .step_by(nthdigit::CHUNK)
+            .map(|i| digits(n + i as u64, nthdigit::CHUNK.min(count - i), mem_bits))
+            .collect();
+    }
+    let mut guard: u64 = 4;
+    loop {
+        let n0 = count as u64 + guard;
+        if n < nthdigit::SMALL_N_THRESHOLD || n < 4 * n0 || n0 > MAX_N0 as u64 {
+            return nthdigit::digits_via_mpfr(n, count);
+        }
+        let n0 = n0 as u32;
+        let (x, terms) = frac_10n_pi_m_with_terms(n, n0, mem_bits);
+        let err = nthdigit::error_units(n0, terms);
+        let base = extract_digits(x, count);
+        let plus = extract_digits(x.wrapping_add(err), count);
+        let minus = extract_digits(x.wrapping_sub(err), count);
+        if base == plus && base == minus {
+            return base;
+        }
+        guard *= 2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::ops::Pow;
+
+    #[test]
+    fn params_are_sane() {
+        for &(n, n0, mem_bits) in &[
+            (2000u64, 20u32, 512u64),
+            (10_000, 30, 2048),
+            (100_000, 40, 8192),
+        ] {
+            let p = Params2::new(n, n0, mem_bits);
+            assert!(p.big_m.is_multiple_of(2));
+            assert!(p.big_m >= 4);
+            assert!(p.big_n.is_multiple_of(2));
+            assert!(p.big_n <= n + 2);
+            assert!(p.error_bound_log10() < -((n + n0 as u64) as f64));
+        }
+    }
+
+    #[test]
+    fn default_mem_bits_grows_like_sqrt_n() {
+        let small = default_mem_bits(10_000);
+        let big = default_mem_bits(1_000_000);
+        // sqrt(1e6)/sqrt(1e4) = 10, so big should be roughly 10x small.
+        let ratio = big as f64 / small as f64;
+        assert!((8.0..12.0).contains(&ratio), "ratio={ratio}");
+    }
+
+    /// A tiny deterministic xorshift64 PRNG (matches `tests/nthdigit.rs`'s), so these tests are
+    /// reproducible without a `rand` dependency.
+    struct Xorshift(u64);
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    /// Exact `Σ_{j=0}^{k} C(N,j)`, brute force via `rug::Integer::binomial`.
+    fn s_k_exact(big_n: u64, k: u64) -> Integer {
+        let mut sum = Integer::from(0);
+        for j in 0..=k {
+            sum += Integer::from(big_n).binomial(j as u32);
+        }
+        sum
+    }
+
+    // -----------------------------------------------------------------------------
+    // Recurrence state (P_t, T_t, D_t) vs exact binomial sums (doc §4.2)
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn recurrence_state_matches_exact_binomial_sums() {
+        for &(big_n, t) in &[
+            (10u64, 0u64),
+            (10, 5),
+            (10, 10),
+            (37, 20),
+            (100, 50),
+            (200, 1),
+        ] {
+            let (alpha, delta, tau) = bs(big_n, 0, t);
+            // Folding the block onto the identity state (1,1,1): P_t=alpha, D_t=delta,
+            // T_t=delta+tau (see module test docs / the derivation in the PR).
+            let p_t = alpha;
+            let d_t = delta;
+            let t_t = Integer::from(&d_t + &tau);
+
+            let p_exact = {
+                let mut prod = Integer::from(1);
+                for j in 1..=t {
+                    prod *= big_n - j + 1;
+                }
+                prod
+            };
+            let d_exact = {
+                let mut prod = Integer::from(1);
+                for j in 1..=t {
+                    prod *= j;
+                }
+                prod
+            };
+            let t_exact = Integer::from(&d_exact * &s_k_exact(big_n, t));
+
+            assert_eq!(p_t, p_exact, "N={big_n} t={t}: P_t mismatch");
+            assert_eq!(d_t, d_exact, "N={big_n} t={t}: D_t mismatch");
+            assert_eq!(t_t, t_exact, "N={big_n} t={t}: T_t mismatch");
+        }
+    }
+
+    #[test]
+    fn advance_mod_q_matches_direct_reduction() {
+        let lg_n = 10u32;
+        for &(big_n, j1, j2, q) in &[
+            (50u64, 0u64, 30u64, 97u64),
+            (200, 10, 150, 9973),
+            (500, 0, 500, 10_007),
+        ] {
+            let qi = Integer::from(q);
+            let start = (
+                Integer::from(1) % &qi,
+                Integer::from(1) % &qi,
+                Integer::from(1) % &qi,
+            );
+            let (p, t, d) = advance(big_n, start, j1, j2, &qi, lg_n);
+
+            // direct step-by-step reference, reduced mod q at every step
+            let (mut pr, mut tr, mut dr) = (1u64 % q, 1u64 % q, 1u64 % q);
+            for j in (j1 + 1)..=j2 {
+                let u = big_n - j + 1;
+                let new_p = mulmod(u % q, pr, q);
+                let new_t = (mulmod(j % q, tr, q) + mulmod(u % q, pr, q)) % q;
+                let new_d = mulmod(j % q, dr, q);
+                pr = new_p;
+                tr = new_t;
+                dr = new_d;
+            }
+            assert_eq!(
+                p.to_u64().unwrap(),
+                pr,
+                "N={big_n} j1={j1} j2={j2} q={q}: P"
+            );
+            assert_eq!(
+                t.to_u64().unwrap(),
+                tr,
+                "N={big_n} j1={j1} j2={j2} q={q}: T"
+            );
+            assert_eq!(
+                d.to_u64().unwrap(),
+                dr,
+                "N={big_n} j1={j1} j2={j2} q={q}: D"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Lucas path vs exact binomial sums
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn lucas_matches_exact_binomial_sums() {
+        let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
+        let mut checked = 0;
+        for _ in 0..400 {
+            // Fresh cache per case: it's keyed on (p, digit-position) only, which is only
+            // valid for a fixed N (true in the real algorithm, where N never changes mid-run;
+            // here N is randomised per case, so a shared cache across cases would serve stale
+            // rows from a *different* N's digits).
+            let mut cache = HashMap::new();
+            let big_n = 20 + rng.next() % 2000;
+            let p = *[3u64, 5, 7, 11, 13, 17, 19, 23, 29, 31]
+                .get((rng.next() % 10) as usize)
+                .unwrap();
+            if p > big_n {
+                continue;
+            }
+            let t = rng.next() % (big_n + 1);
+            let r = t % p;
+            let sr: u64 = (s_k_exact(big_n, r) % Integer::from(p))
+                .to_string()
+                .parse()
+                .unwrap();
+            let cr: u64 = (Integer::from(big_n).binomial(r as u32) % Integer::from(p))
+                .to_string()
+                .parse()
+                .unwrap();
+            let got = lucas_s(big_n, t, p, sr, cr, &mut cache);
+            let expected: u64 = (s_k_exact(big_n, t) % Integer::from(p))
+                .to_string()
+                .parse()
+                .unwrap();
+            assert_eq!(got, expected, "N={big_n} t={t} p={p} r={r}");
+            checked += 1;
+        }
+        assert!(
+            checked > 100,
+            "too few valid (N,t,p) cases generated: {checked}"
+        );
+    }
+
+    // -----------------------------------------------------------------------------
+    // p-adic Lucas recursion vs exact binomial sums, e >= 1 (e=1 degenerates to Lucas)
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn padic_matches_exact_binomial_sums() {
+        let mut rng = Xorshift(0xD1B5_4A32_D192_ED03);
+        let primes = [2u64, 3, 5, 7, 11, 13, 17, 23, 31, 37, 53, 101];
+        let mut checked = 0;
+        for _ in 0..400 {
+            let p = primes[(rng.next() % primes.len() as u64) as usize];
+            let e = 1 + (rng.next() % 4) as u32; // 1..=4
+            let big_n = 5 + rng.next() % 3000;
+            let t = rng.next() % (big_n + 1);
+            let modulus = p.pow(e);
+
+            let mut pb = PadicBinom::new(p, e);
+            let got_s = pb.s(big_n, t as i64, e);
+            let got_c = pb.c(big_n, t as i64, e);
+
+            let exp_s: u64 = (s_k_exact(big_n, t) % Integer::from(modulus))
+                .to_string()
+                .parse()
+                .unwrap();
+            let exp_c: u64 = (Integer::from(big_n).binomial(t as u32) % Integer::from(modulus))
+                .to_string()
+                .parse()
+                .unwrap();
+            assert_eq!(got_s, exp_s, "S: N={big_n} t={t} p={p} e={e}");
+            assert_eq!(got_c, exp_c, "C: N={big_n} t={t} p={p} e={e}");
+            checked += 1;
+        }
+        assert_eq!(checked, 400);
+    }
+
+    #[test]
+    fn padic_matches_exact_binomial_sums_boundary_cases() {
+        // t >= N and t == 0 edge cases, plus every e up to 5 for a couple of primes.
+        for &p in &[3u64, 5, 7] {
+            for e in 1..=5u32 {
+                let modulus = p.pow(e);
+                for &(big_n, t) in &[
+                    (0u64, 0u64),
+                    (1, 0),
+                    (1, 1),
+                    (50, 0),
+                    (50, 50),
+                    (50, 51),
+                    (200, 200),
+                ] {
+                    let mut pb = PadicBinom::new(p, e);
+                    let got = pb.s(big_n, t as i64, e);
+                    let expected: u64 = if t > big_n {
+                        (Integer::from(2).pow(big_n as u32) % Integer::from(modulus))
+                            .to_string()
+                            .parse()
+                            .unwrap()
+                    } else {
+                        (s_k_exact(big_n, t) % Integer::from(modulus))
+                            .to_string()
+                            .parse()
+                            .unwrap()
+                    };
+                    assert_eq!(got, expected, "p={p} e={e} N={big_n} t={t}");
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Partial-fraction split reassembles: contribution via split parts == contribution via
+    // the unsplit modulus (doc §3 "obstacles 2/4").
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn partial_fraction_split_reassembles() {
+        // m = p1^e1 * p2^e2 * p3, all coprime; compute frac(X*s/m) directly, then via the
+        // partial-fraction split (each part computed mod its own prime power and combined the
+        // way add_contribution does), and check they match to within the fixed-point ulp.
+        let big_n = 40u64;
+        let n = 1000u64;
+        let base = 987_654_321u64; // arbitrary base so m_k = base + 2k is realistic-looking
+        for &t in &[3u64, 10, 20] {
+            let k = t; // unmirrored (k == t)
+            let m = base + 2 * k;
+            // Factor m by trial division (m is small enough here).
+            let mut rem = m;
+            let mut factors = Vec::new();
+            let mut d = 2u64;
+            while d * d <= rem {
+                if rem.is_multiple_of(d) {
+                    let mut e = 0;
+                    while rem.is_multiple_of(d) {
+                        rem /= d;
+                        e += 1;
+                    }
+                    factors.push((d, e));
+                }
+                d += 1;
+            }
+            if rem > 1 {
+                factors.push((rem, 1));
+            }
+
+            let s_exact: u64 = (s_k_exact(big_n, t) % Integer::from(m))
+                .to_string()
+                .parse()
+                .unwrap();
+
+            // Direct (unsplit) contribution: same formula as add_contribution but mod the
+            // whole m (cofactor = 1, so the modular inverse step is a no-op).
+            let direct = add_contribution(n, big_n, base, k, t, m, s_exact);
+
+            // Split: for each prime power part q=p^e, s mod q via Lucas (e==1) or PadicBinom
+            // (e>=2), reassembled via add_contribution's partial-fraction logic.
+            let mut split_acc = 0u128;
+            for &(p, e) in &factors {
+                let q = p.pow(e);
+                let s_part: u64 = (s_k_exact(big_n, t) % Integer::from(q))
+                    .to_string()
+                    .parse()
+                    .unwrap();
+                split_acc =
+                    split_acc.wrapping_add(add_contribution(n, big_n, base, k, t, q, s_part));
+            }
+            // Each part rounds independently (one floor per add_contribution call), so the
+            // split sum can differ from the single unsplit computation by a few ulps of the
+            // u128 fixed-point encoding (this is exactly why error_units is charged one ulp
+            // per *actual* rounded term, not one per k — see the module docs). Bound the
+            // difference by the number of parts, not zero.
+            let diff = direct.wrapping_sub(split_acc);
+            let diff = diff.min(diff.wrapping_neg());
+            assert!(
+                diff <= factors.len() as u128 + 1,
+                "t={t} m={m} factors={factors:?}: direct={direct} split={split_acc} diff={diff}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Remainder-tree (art_chunk) results vs direct mod
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn art_chunk_matches_direct_mod() {
+        let big_n = 60u64;
+        let n = 2000u64;
+        let base = 123_456_789u64;
+        let lg_n = 64 - big_n.leading_zeros();
+        // A handful of synthetic Main items at various targets and moduli.
+        let items = vec![
+            Item {
+                t: 5,
+                q: 97,
+                tag: Tag::Main(5),
+            },
+            Item {
+                t: 12,
+                q: 9973,
+                tag: Tag::Main(12),
+            },
+            Item {
+                t: 12,
+                q: 10_007,
+                tag: Tag::Main(47),
+            }, // k=N-1-t=47 mirrored
+            Item {
+                t: 30,
+                q: 104_729,
+                tag: Tag::Main(30),
+            },
+        ];
+        let (acc, terms, lucas_out) = art_chunk(n, big_n, base, &items, lg_n);
+        assert_eq!(terms, items.len() as u64);
+        assert!(lucas_out.is_empty());
+
+        let mut expected = 0u128;
+        for it in &items {
+            let s: u64 = (s_k_exact(big_n, it.t) % Integer::from(it.q))
+                .to_string()
+                .parse()
+                .unwrap();
+            let Tag::Main(k) = it.tag else { unreachable!() };
+            expected = expected.wrapping_add(add_contribution(n, big_n, base, k, it.t, it.q, s));
+        }
+        assert_eq!(acc, expected);
+    }
+
+    // -----------------------------------------------------------------------------
+    // Segmented-sieve factorisation vs trial division
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn factor_interval_matches_trial_division() {
+        let (big_m, big_n) = (12u64, 200u64);
+        let fac = factor_interval(big_m, big_n);
+        let base = 2 * big_m * big_n + 1;
+        for k in 0..big_n {
+            let mut rem = base + 2 * k;
+            let mut expected = Vec::new();
+            let mut d = 3u64; // m_k is always odd
+            while d * d <= rem {
+                if rem.is_multiple_of(d) {
+                    let mut e = 0u32;
+                    while rem.is_multiple_of(d) {
+                        rem /= d;
+                        e += 1;
+                    }
+                    expected.push((d, e));
+                }
+                d += 2;
+            }
+            if rem > 1 {
+                expected.push((rem, 1));
+            }
+            let mut got = fac[k as usize].clone();
+            got.sort();
+            expected.sort();
+            assert_eq!(got, expected, "k={k}");
+        }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Full frac_10n_pi_m vs Theorem 1 and vs MPFR, across mem_bits values
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn frac_10n_pi_m_matches_theorem1_and_mpfr() {
+        use crate::pslq::digits_to_bits;
+        use rug::{Float, float::Constant};
+
+        for &n in &[2500u64, 5000, 20_000] {
+            for &mem_bits in &[256u64, 1024, 8192] {
+                let n0 = 20u32;
+                let (thm2, terms) = frac_10n_pi_m_with_terms(n, n0, mem_bits);
+                let thm1 = nthdigit::frac_10n_pi(n, n0);
+                let err2 = nthdigit::error_units(n0, terms);
+                let diff = thm2.wrapping_sub(thm1);
+                let diff = diff.min(diff.wrapping_neg());
+                assert!(
+                    diff <= 2 * err2,
+                    "n={n} mem_bits={mem_bits}: thm1/thm2 disagree by {diff} > 2*{err2}"
+                );
+
+                // Cross-check against MPFR directly too.
+                let bits = digits_to_bits((n + 40) as u32) + 8;
+                let pi = Float::with_val(bits, Constant::Pi);
+                let scale = Float::with_val(bits, Integer::from(10).pow((n + 20) as u32));
+                let scaled = Float::with_val(bits, &pi * &scale);
+                let int_part = scaled.to_integer().unwrap();
+                let s = int_part.to_string();
+                // s = "3" followed by (n+20) decimal digits, so s[i] is the digit at position
+                // i (1-based); we want positions n+1..=n+10.
+                let start = (n + 1) as usize;
+                let digits10: String = s[start..start + 10].to_string();
+                let got10 = extract_digits(thm2, 10);
+                assert_eq!(got10, digits10, "n={n} mem_bits={mem_bits}: vs MPFR");
+            }
+        }
+    }
+
+    #[test]
+    fn digits_matches_theorem1_across_mem_bits() {
+        for &n in &[3000u64, 15_000, 50_000] {
+            for &mem_bits in &[512u64, default_mem_bits(n), 16384] {
+                let count = 10;
+                let got1 = nthdigit::digits(n, count);
+                let got2 = digits(n, count, mem_bits);
+                assert_eq!(got1, got2, "n={n} mem_bits={mem_bits}");
+            }
+        }
+    }
+}
