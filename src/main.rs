@@ -18,15 +18,12 @@ struct Cli {
     cmd: Cmd,
 }
 
-/// Which n-th-digit algorithm to use. Default is `Thm1` (Gourdon Theorem 1, `O(log² n)`
-/// memory, `O(n²)`-ish time): it's the one with the deep test history (MPFR-verified through
-/// 10^7 in `docs/nthdigit.md`) and no O(n)-sized bookkeeping. `Thm2` (Theorem 2, the chunked
-/// remainder-tree algorithm in `docs/nthdigit-theorem2.md`) wins on speed from roughly n >=
-/// 4e4 (see that doc's benchmark table) but its bookkeeping (factor table, ART item list) is
-/// still `O(N)` words rather than the fully `O(mem_bits)` the theorem promises — see
-/// `src/nthdigit2.rs` module docs. Making the user opt in with `--method thm2` keeps existing
-/// callers' memory/behavior unchanged and treats the new algorithm as what it is: faster, but
-/// newer and with a documented memory caveat.
+/// Which n-th-digit algorithm to use. Default is `Thm2` (Gourdon Theorem 2, the chunked
+/// remainder-tree algorithm in `docs/nthdigit-theorem2.md`): about 25x faster than Theorem 1
+/// at n = 10^6 and ~60x at 10^7, with peak memory in the tens of MiB (69 MiB at 10^7, see
+/// `docs/nthdigit.md`), MPFR-verified through 10^7. `Thm1` (Theorem 1, `O(log² n)` memory,
+/// `O(n²)`-ish time) stays available as the strict-memory option: a flat ~5 MiB at any
+/// position, at the cost of hours instead of minutes at 10^7.
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum Method {
     Thm1,
@@ -63,7 +60,7 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         count: usize,
         /// Which algorithm to use; see [`Method`].
-        #[arg(long, value_enum, default_value_t = Method::Thm1)]
+        #[arg(long, value_enum, default_value_t = Method::Thm2)]
         method: Method,
         /// Theorem 2 only: ART chunk modulus size in bits (memory budget). Default scales as
         /// `~4*sqrt(pos)` decimal digits (`pihunt::nthdigit2::default_mem_bits`), the "headline"
@@ -82,7 +79,7 @@ enum Cmd {
         #[arg(long, hide = true)]
         blocks: Option<u64>,
         /// Which algorithm to use; see [`Method`].
-        #[arg(long, value_enum, default_value_t = Method::Thm1)]
+        #[arg(long, value_enum, default_value_t = Method::Thm2)]
         method: Method,
         /// Theorem 2 only: ART chunk modulus size in bits. See `digit --mem`.
         #[arg(long)]

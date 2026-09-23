@@ -1,5 +1,23 @@
 # N-th decimal digit extraction
 
+## Position convention (read this first)
+
+- **CLI:** `pihunt digit <pos>` is 1-based: `pihunt digit 1 --count 5` → `14159` (3.**1**4159…).
+- **Library:** `nthdigit::digits(n, count)` / `nthdigit2::digits(n, count, mem)` return positions
+  `n+1 ..= n+count`, so `pihunt digit <pos>` calls them with `n = pos − 1`.
+- Every digit string quoted in this doc is a **CLI** position unless it says otherwise:
+
+| `pihunt digit` position | digits | position + 1 |
+|---:|---|---|
+| 10⁴ | `8566722796` | `5667227966` |
+| 10⁵ | `6412600243` | `4126002437` |
+| 10⁶ | `1309275628` | `3092756283` |
+| 3·10⁶ | `3697067915` | `6970679155` |
+| 10⁷ | `7259151336` | `2591513361` |
+
+(10⁴–3·10⁶ regenerated with the CLI on 2026-09-23, Theorem 1 and 2 agreeing; 10⁷ both columns
+MPFR-verified.)
+
 **Status: implemented, benchmarked, verified against MPFR through 10⁶.** Follows on from
 `docs/findings-bbp-hunt.md`'s "next direction" (attacking the cost of existing decimal
 digit extraction rather than hunting for new formulas). Unrelated to the PSLQ code
@@ -229,7 +247,7 @@ own baseline footprint and rayon's thread pool at every `n` tested so far.
 
 ## MPFR verification
 
-- n = 10⁵: `cargo test --release --test nthdigit -- --ignored digit_at_1e5_matches_mpfr` — **passes**, digits `6412600243` — unchanged after the sieve/Montgomery rewrite, re-run and reconfirmed this session.
+- position 10⁵: `cargo test --release --test nthdigit -- --ignored digit_at_1e5_matches_mpfr` — **passes** (the test checks library offset n = 10⁵, i.e. `4126002437`; the CLI string at position 10⁵ is `6412600243`) — unchanged after the sieve/Montgomery rewrite, re-run and reconfirmed this session.
 - n = 10⁶: (then) `cargo test --release --test nthdigit -- --ignored digit_at_1e6_matches_mpfr` — **passed**; that test has since been capped at 2·10⁵ (`digit_at_2e5_matches_mpfr`, see "Test sizes and memory" below), the verified 10⁶ digits are recorded here — digits `1309275628` — unchanged, re-run and reconfirmed this session (both 10⁵ and 10⁶ ignored tests together: 75.17 s, dominated by MPFR's own reference computation, not the algorithm under test).
 - n = 10⁷: digits `7259151336` — **verified** (with the *old* algorithm; see the 10⁷ timings note above for why this wasn't re-run) against MPFR (gmpy2 `const_pi` at 3.3·10⁷ bits, 10 s), positions 10⁷…10⁷+9.
 - n = 1, 762 (Feynman point), and everywhere in `[0, 20000)` (200 sequential + 200 random positions): checked in `digits_match_mpfr_reference`, part of the default `cargo test` run — passes with the new code, and noticeably faster than before (this test alone dropped from ~15-32 s to ~5 s wall time across the whole `cargo test --release --test nthdigit` run, consistent with the timings above once you factor in that most of its 400 evaluations are at small `n` where the win is smaller).
@@ -287,23 +305,18 @@ previous table's 3.8×/8.9× — not a regression, just this session's fresh tim
 noisier point on a shared machine (see the RSS columns: Thm2 itself got *smaller*, not slower, at
 every `n`); the headline scaling trend (speedup growing with `n`) is unchanged.
 
-Digits: 10⁴ → `8566722796`, 10⁵ → `6412600243`, 10⁶ → `1309275628`, 3·10⁶ → `3697067915`, 10⁷ →
-`2591513361` — all **identical to Theorem 1's output at the same position** (see
-`tests/nthdigit2.rs` for this checked automatically at many n/mem_bits combinations) and all
-**independently verified against MPFR** (see below).
+Digits (see "Position convention" at the top of this doc — CLI positions, i.e. `pihunt digit
+10^k` = positions 10^k … 10^k+9): 10⁴ → `8566722796`, 10⁵ → `6412600243`, 10⁶ → `1309275628`,
+3·10⁶ → `3697067915`, 10⁷ → `7259151336` — all **identical to Theorem 1's output at the same
+position** (see `tests/nthdigit2.rs` for this checked automatically at many n/mem_bits
+combinations) and all **independently verified against MPFR** (see below).
 
-**Correction found this session:** the previous table's `10⁷ → 7259151336` was off by one
-position. `pihunt digit <pos>` computes internal `n = pos - 1` and returns digits at positions
-`n+1..=n+count`; `digit 10000001` (internal `n = 10⁷` exactly) returns `2591513361`, confirmed
-against an independent MPFR spigot (`digits_via_mpfr(10_000_000, 10)`, ~12 s, ~4 MiB, unrelated
-to both Theorem 1 and 2's O(n^1.5-ish) algorithms). `7259151336` is actually
-`digit 10000000`'s output (internal `n = 9999999`), also independently confirmed
-(`digits_via_mpfr(9_999_999, 10)`). This is a pre-existing labelling bug in this doc (and in
-`tests/nthdigit2.rs`'s "re-check by hand" comment, fixed below) — not a regression from this
-session's changes, and not re-verified by re-running the O(n^1.5-ish) Theorem-2 algorithm a
-second time at `n ≈ 10⁷` (the hard safety cap only allows that once per session; the correction
-was confirmed with the cheap MPFR-only check instead, which doesn't run either digit-extraction
-algorithm).
+**On an earlier "off-by-one correction":** one session briefly relabelled the 10⁷ row as
+`2591513361`. That value is correct too, but it is `pihunt digit 10000001` (library call
+`digits(10_000_000, 10)`), i.e. one position later than every other row. Nothing was ever wrong
+in the code; only labels mixed the CLI (1-based position) and library (offset `n`, digits start at
+`n+1`) conventions. Both 10⁷ strings are MPFR-verified:
+`digit 10000000` → `7259151336`, `digit 10000001` → `2591513361`.
 
 The speedup grows with `n`, as the doc predicts (`Thm2/Thm1 ∝ 1/(mem_bits · polylog)` roughly,
 and `mem_bits` itself grows with `n` in this "default" row): 3.8× at 10⁴ up to ~54× at 10⁷,
@@ -348,8 +361,7 @@ exponent measurement.
 
 ### MPFR verification
 
-- n = 10⁵, 10⁶: `cargo test --release --test nthdigit2 -- --ignored` — **passes**, `6412600243`
-  / `1309275628`, checked against `rug`/MPFR the same way as the Theorem-1 table above.
+- positions 10⁵, 10⁶: `cargo test --release --test nthdigit2 -- --ignored` — **passes** (library offsets n = 10⁵, 10⁶; CLI strings at those positions `6412600243` / `1309275628`), checked against `rug`/MPFR the same way as the Theorem-1 table above.
 - n = 10⁶, 10⁷: independently cross-checked with **gmpy2** (not `rug`/MPFR — a different library
   binding, in `research/thm2`'s own venv) via `gmpy2.const_pi()` at precision `⌈(pos+30)·log₂10⌉
   + 16` bits and slicing its `gmpy2.digits(pi, 10)` mantissa string at `[pos:pos+10]`: both match
@@ -463,9 +475,7 @@ Measured peak RSS per test (release build, run one at a time; 2026-09-23):
 
 No single test comes near the limit. The OOM came from running heavy work concurrently:
 the ignored large-position checks ran in parallel within one test binary, each using every
-core. They're now serialized by a lock. The 10⁷ check is gone from the suite; its digits
-(`2591513361` — see the "Correction found this session" note above the Theorem-2 headline
-table for why this isn't `7259151336`, a pre-existing off-by-one this session found and fixed
-in this doc's prose) are MPFR-verified above. To re-check it by hand:
-`pihunt digit 10000001 --method thm2` (~2 min, ~70 MiB as of this session's memory fix).
+core. They're now serialized by a lock. The 10⁷ check is gone from the suite; its digits are
+MPFR-verified above. To re-check by hand: `pihunt digit 10000000` → `7259151336` (~2 min,
+~70 MiB; Theorem 2 is the default method).
 

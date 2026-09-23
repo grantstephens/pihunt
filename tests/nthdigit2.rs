@@ -119,14 +119,11 @@ fn digit_at_1e6_matches_mpfr() {
     check_large_digit(1_000_000);
 }
 
-// No 10^7 test: ~2 minutes even on its own (memory is no longer the reason it's excluded as of
-// the 2026-09-23 memory fix — peak RSS there is now ~70 MiB, not the ~450 MiB that, run
-// alongside the other ignored checks, helped push an 8 GiB machine into OOM). Its digits
-// (`2591513361` for `nthdigit2::digits(10_000_000, 10, ..)`, i.e. `pihunt digit 10000001
-// --method thm2` — not `7259151336`, which is one position earlier, `digit 10000000`; a
-// pre-existing off-by-one in this comment and docs/nthdigit.md, found and fixed this session)
-// are MPFR-verified and recorded in docs/nthdigit.md; re-check by hand with
-// `pihunt digit 10000001 --method thm2`.
+// No 10^7 test: ~2 minutes even on its own (peak RSS is ~70 MiB since the 2026-09-23 memory
+// fix; it was ~450 MiB, which alongside the other ignored checks helped OOM an 8 GiB machine).
+// Its digits are MPFR-verified in docs/nthdigit.md ("Position convention"):
+// `nthdigit2::digits(10_000_000, 10, ..)` = `pihunt digit 10000001` = `2591513361`, and
+// `pihunt digit 10000000` = `7259151336`.
 
 /// The large-position checks each use every core and up to ~100 MiB; run them one at a time
 /// even when the test harness runs `--include-ignored` in parallel.
