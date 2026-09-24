@@ -212,6 +212,7 @@ function initDemo() {
     }
 
     function setWarning(show) {
+      warningEl.textContent = SOFT_WARNING_MESSAGE;
       warningEl.classList.toggle('hidden', !show);
     }
 
