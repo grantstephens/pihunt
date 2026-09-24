@@ -1,11 +1,22 @@
 [workspace]
 members = [".", "crates/pi-digits"]
+# site/wasm has its own [workspace] and CARGO_TARGET_DIR ($HOME/.cache/pihunt/target-wasm): it
+# builds pi-digits under `pure`, while this workspace builds it under `gmp`. Cargo unifies
+# features across a single workspace, and pi-digits's `compile_error!` forbids enabling both —
+# so site/wasm must stay out of this workspace (both by never being listed as a member, and
+# explicitly here, in case some future glob/tooling would otherwise sweep it in).
+exclude = ["site/wasm"]
 resolver = "3"
 
 [package]
 name = "pihunt"
 version = "0.2.0"
 edition = "2024"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
 
 [features]
 # Temporary, throwaway profiling instrumentation for pi-digits's nthdigit.rs C-sum (factoring

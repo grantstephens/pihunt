@@ -1,0 +1,26 @@
+[workspace]
+# Deliberately empty: this opts `site/wasm` out of the root Cargo.toml's workspace (which builds
+# pi-digits under `gmp`). This crate builds pi-digits under `pure` instead — the two feature sets
+# are mutually exclusive (see crates/pi-digits/src/lib.rs's compile_error!), so they can't share
+# a workspace's unified feature resolution. Build with its own CARGO_TARGET_DIR, e.g.:
+#   CARGO_TARGET_DIR=$HOME/.cache/pihunt/target-wasm wasm-pack build site/wasm --target web ...
+
+[package]
+name = "pi-digits-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pi-digits = { path = "../../crates/pi-digits", default-features = false, features = ["pure"] }
+wasm-bindgen = "0.2"
+
+# Cargo only honours [profile.*] at the workspace root; since this crate has its own [workspace]
+# above, this is that root.
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
