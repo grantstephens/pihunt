@@ -425,6 +425,7 @@ article h2 {
   letter-spacing: -0.005em;
   margin: 0 0 1rem;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 0.6rem;
 }
@@ -509,13 +510,57 @@ details summary {
   gap: 0.6rem;
 }
 details[open] summary { margin-bottom: 0.6rem; }
-details p, details .katex-display { max-width: 70ch; }
+details p { max-width: 70ch; }
+
+/* Display math can be genuinely wider than a narrow viewport (KaTeX lays
+   formulas out at a fixed, non-reflowable intrinsic width, and separately
+   renders a visually-hidden MathML accessibility tree that can need an
+   even wider box). CSS overflow alone only clips *painting* -- it can't
+   change the *layout size* a strict "nothing wider than the viewport"
+   check sees on the overflowing descendants, so site/src/math.js measures
+   each equation (including its MathML tree) after KaTeX renders it and
+   applies a CSS transform: scale() that's small enough to fit -- a
+   transform does change what getBoundingClientRect() reports for an
+   element and everything inside it. This overflow-x/padding is the
+   fallback for anything math.js doesn't run for (e.g. its own errors);
+   most equations need no shrinking and never engage it. */
+.katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.3em 0.15em 0.5em;
+}
+/* Must stay overflow:visible (the default) and NOT pick up the inline-math
+   rule below's overflow-x:auto: that inner rule is written as a descendant
+   selector (`p .katex`), which also matches this element (.katex-display's
+   own <p> ancestor contains it too), and if it won, this inner span would
+   become its own scroll container that "absorbs" the overflow one level
+   too early -- leaving .katex-display's *own* scrollWidth (what
+   site/src/math.js measures) blind to content that individual descendants
+   (KaTeX's rendered spans, its MathML tree) still report as overflowing
+   via getBoundingClientRect(). Higher specificity than `p .katex` (two
+   classes vs. one) makes this win regardless of source order. */
+.katex-display > .katex {
+  max-width: 100%;
+  overflow-x: visible;
+  overflow-y: visible;
+}
+/* Inline (non-display) math should never force paragraph-level overflow
+   either -- same scroll-in-place treatment, no extra padding needed
+   since it sits inline rather than in its own block. */
+p .katex, li .katex, td .katex, blockquote .katex {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: middle;
+}
 
 .badge {
   font-family: var(--font-mono);
   font-size: 0.8em;
   font-weight: 500;
-  white-space: nowrap;
+  min-width: 0;
 }
 .badge-proved { color: var(--badge-proved); }
 .badge-measured { color: var(--badge-measured); }
@@ -524,6 +569,7 @@ details p, details .katex-display { max-width: 70ch; }
 .badge::after { content: ']'; }
 
 .table-scroll {
+  max-width: 100%;
   overflow-x: auto;
   margin: 1.2rem 0;
 }
@@ -538,6 +584,24 @@ th, td {
   padding: 0.55rem 0.9rem;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
+}
+
+/* Below the point where the reading column has no room for a naturally
+   laid-out table (wide headers, long cell text), reflow instead of
+   relying on the scroll wrapper alone: a fixed layout forces every
+   column into the available width and wraps its text, so the table's
+   own rendered width never exceeds the viewport in the first place. */
+@media (max-width: 480px) {
+  .table-scroll table {
+    table-layout: fixed;
+    width: 100%;
+  }
+  .table-scroll th,
+  .table-scroll td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
 }
 th {
   font-weight: 650;
