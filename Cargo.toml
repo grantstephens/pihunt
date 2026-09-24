@@ -13,11 +13,6 @@ name = "pihunt"
 version = "0.2.0"
 edition = "2024"
 
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
-
 [features]
 # Temporary, throwaway profiling instrumentation for pi-digits's nthdigit.rs C-sum (factoring
 # time vs binomial-loop time). Not meant to ship enabled; see docs/nthdigit.md.
