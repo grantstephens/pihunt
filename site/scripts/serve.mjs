@@ -69,6 +69,8 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(port, () => {
-  console.log(`serving ${roots.join(', ')} at http://localhost:${port}/`);
+// Bind to loopback only -- this is a local dev/preview server, not meant to be reachable from
+// the network.
+server.listen(port, '127.0.0.1', () => {
+  console.log(`serving ${roots.join(', ')} at http://127.0.0.1:${port}/`);
 });

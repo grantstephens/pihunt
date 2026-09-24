@@ -29,3 +29,12 @@ test('lanesAgree', () => {
   assert.equal(lanesAgree('0123456789', '0123456789'), true);
   assert.equal(lanesAgree('0123456789', '0123456780'), false);
 });
+
+test('browserSupportsDemo', () => {
+  assert.equal(browserSupportsDemo({ WebAssembly: {}, Worker: function () {} }), true);
+  assert.equal(browserSupportsDemo({ Worker: function () {} }), false); // no WebAssembly
+  assert.equal(browserSupportsDemo({ WebAssembly: {} }), false); // no Worker
+  assert.equal(browserSupportsDemo({}), false);
+  // Plain Node (no DOM globals) must not accidentally report support.
+  assert.equal(browserSupportsDemo(globalThis), false);
+});
