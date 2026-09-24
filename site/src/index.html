@@ -3,69 +3,594 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pihunt digits demo</title>
-<style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
-  .digits { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
-  .lane { border: 1px solid #ccc; padding: 0.75rem; margin: 0.5rem 0; }
-  .warning { color: #a15c00; }
-  .error, .mismatch { color: #b00020; font-weight: bold; }
-  .match { color: #0a7a2f; font-weight: bold; }
-  .hidden { display: none; }
-  fieldset { margin-bottom: 1rem; }
-  .stream-block { display: inline-block; margin: 0 0.5rem 0.25rem 0; }
-</style>
+<title>Decimal digits of &pi; in O(&radic;n) memory</title>
+<meta name="description" content="A reconstruction and verified Rust implementation of Xavier Gourdon's unpublished 2003 Theorem 2 for computing decimal digits of &pi; with O(m) memory, plus a live in-browser demo.">
+<link rel="stylesheet" href="./vendor/katex/katex.min.css">
+<link rel="stylesheet" href="./style.css">
 </head>
 <body>
-<h1>pihunt: race &amp; stream demo</h1>
+<a class="skip-link" href="#main">Skip to content</a>
 
-<section id="race-panel">
-  <h2>Race: Theorem 1 vs Theorem 2</h2>
-  <fieldset>
-    <legend>Position</legend>
-    <label for="race-pos">Position (1&ndash;200,000)</label>
-    <input type="text" id="race-pos" value="1000" inputmode="numeric" autocomplete="off">
-    <button type="button" data-race-preset="1000">1,000</button>
-    <button type="button" data-race-preset="10000">10,000</button>
-    <button type="button" data-race-preset="50000">50,000</button>
-    <button type="button" data-race-preset="100000">100,000</button>
-    <button type="button" id="race-start">Race</button>
-    <button type="button" id="race-cancel">Cancel</button>
-    <p id="race-error" class="error hidden"></p>
-    <p id="race-warning" class="warning hidden">This may take a minute or more in the browser.</p>
-  </fieldset>
-
-  <div class="lane" id="lane-thm1">
-    <h3>Theorem 1</h3>
-    <p>Elapsed: <span id="thm1-timer">&ndash;</span></p>
-    <p class="digits" id="thm1-digits"></p>
-    <p>Time: <span id="thm1-ms">&ndash;</span> &middot; Memory: <span id="thm1-mem">&ndash;</span></p>
+<header class="site-header">
+  <div class="wrap wrap-wide site-header-row">
+    <span class="wordmark">pihunt</span>
+    <button type="button" id="theme-toggle" class="theme-toggle" aria-pressed="false">
+      <span class="theme-toggle-icon" aria-hidden="true"></span>
+      <span class="theme-toggle-label">Dark mode</span>
+    </button>
   </div>
-  <div class="lane" id="lane-thm2">
-    <h3>Theorem 2</h3>
-    <p>Elapsed: <span id="thm2-timer">&ndash;</span></p>
-    <p class="digits" id="thm2-digits"></p>
-    <p>Time: <span id="thm2-ms">&ndash;</span> &middot; Memory: <span id="thm2-mem">&ndash;</span></p>
-  </div>
+</header>
 
-  <p id="lanes-agreement"></p>
-  <p id="reference-check"></p>
+<main id="main">
+
+<section class="hero wrap wrap-wide">
+  <h1>Decimal digits of &pi; in O(&radic;n) memory: Gourdon&rsquo;s unpublished 2003 Theorem 2, reconstructed</h1>
+  <p class="lede">
+    In 2003 Xavier Gourdon announced that the <em>n</em>-th decimal digit of &pi; could be found with
+    an adjustable memory budget <em>m</em> instead of the usual O(log&sup2;&nbsp;n) &mdash; but never
+    published how. This site reconstructs a concrete algorithm that hits his bound, implements it in
+    Rust, and races it against the classical method live in your browser, on the same code the CLI uses.
+  </p>
+  <nav class="toc" aria-label="Page sections">
+    <a href="#background">Background</a>
+    <a href="#claim">The claim</a>
+    <a href="#reconstruction">The reconstruction</a>
+    <a href="#complexity">Complexity</a>
+    <a href="#implementation">Implementation</a>
+    <a href="#benchmarks">Benchmarks</a>
+    <a href="#verification">Verification</a>
+    <a href="#limits">Limits</a>
+    <a href="#reproduce">Reproduce it</a>
+    <a href="#postscript">Postscript</a>
+    <a href="#references">References</a>
+  </nav>
 </section>
 
-<section id="stream-panel">
-  <h2>Stream</h2>
-  <fieldset>
-    <legend>Start position</legend>
-    <label for="stream-pos">Start position (1&ndash;200,000)</label>
-    <input type="text" id="stream-pos" value="1" inputmode="numeric" autocomplete="off">
-    <button type="button" id="stream-start">Start</button>
-    <button type="button" id="stream-stop">Stop</button>
-    <p id="stream-error" class="error hidden"></p>
-  </fieldset>
-  <p>Memory: <span id="stream-mem">&ndash;</span></p>
-  <div class="digits" id="stream-output"></div>
+<section class="wrap wrap-wide" aria-labelledby="demo-heading">
+  <h2 id="demo-heading" class="visually-hidden">Live demo</h2>
+  <noscript>
+    <p class="notice">This demo needs JavaScript and WebAssembly to run in your browser. See the
+    <a href="#benchmarks">benchmark table</a> below for measured performance, or build the CLI
+    yourself &mdash; see <a href="#reproduce">Reproduce it</a>.</p>
+  </noscript>
+
+  <section id="race-panel">
+    <h2>Race: Theorem 1 vs Theorem 2</h2>
+    <p>Both lanes compute the same 10 digits, starting from the same position, using the same
+      WebAssembly build of the code the CLI uses &mdash; one running Theorem 1 (the classical,
+      O(log&sup2;&nbsp;n)-memory method), the other Theorem 2 (this reconstruction). Positions up to
+      200,000 are checked live against a shipped reference file.</p>
+    <fieldset>
+      <legend>Position</legend>
+      <label for="race-pos">Position (1&ndash;200,000)</label>
+      <input type="text" id="race-pos" value="1000" inputmode="numeric" autocomplete="off">
+      <button type="button" data-race-preset="1000">1,000</button>
+      <button type="button" data-race-preset="10000">10,000</button>
+      <button type="button" data-race-preset="50000">50,000</button>
+      <button type="button" data-race-preset="100000">100,000</button>
+      <button type="button" id="race-start" class="btn-primary">Race</button>
+      <button type="button" id="race-cancel">Cancel</button>
+      <p id="race-error" class="error hidden"></p>
+      <p id="race-warning" class="warning hidden">This may take a minute or more in the browser.</p>
+    </fieldset>
+
+    <div class="lanes">
+      <div class="lane" id="lane-thm1">
+        <h3>Theorem 1</h3>
+        <p>Elapsed: <span id="thm1-timer">&ndash;</span></p>
+        <p class="digits" id="thm1-digits"></p>
+        <p>Time: <span id="thm1-ms">&ndash;</span> &middot; Memory: <span id="thm1-mem">&ndash;</span></p>
+      </div>
+      <div class="lane" id="lane-thm2">
+        <h3>Theorem 2</h3>
+        <p>Elapsed: <span id="thm2-timer">&ndash;</span></p>
+        <p class="digits" id="thm2-digits"></p>
+        <p>Time: <span id="thm2-ms">&ndash;</span> &middot; Memory: <span id="thm2-mem">&ndash;</span></p>
+      </div>
+    </div>
+
+    <p id="lanes-agreement" class="check-line"></p>
+    <p id="reference-check" class="check-line"></p>
+  </section>
+
+  <section id="stream-panel">
+    <h2>Stream</h2>
+    <p>Computes successive 10-digit blocks from scratch, one after another, using Theorem 1, never
+      holding earlier digits in memory &mdash; the &ldquo;keep churning&rdquo; case that started this
+      whole project.</p>
+    <fieldset>
+      <legend>Start position</legend>
+      <label for="stream-pos">Start position (1&ndash;200,000)</label>
+      <input type="text" id="stream-pos" value="1" inputmode="numeric" autocomplete="off">
+      <button type="button" id="stream-start" class="btn-primary">Start</button>
+      <button type="button" id="stream-stop">Stop</button>
+      <p id="stream-error" class="error hidden"></p>
+    </fieldset>
+    <p>Memory: <span id="stream-mem">&ndash;</span></p>
+    <div class="digits" id="stream-output"></div>
+  </section>
 </section>
 
+<article class="wrap">
+
+<section id="background">
+  <h2>Background</h2>
+  <p>The BBP formula (Bailey&ndash;Borwein&ndash;Plouffe, 1995) can produce hexadecimal (or any
+    power-of-two-base) digits of &pi; starting at an arbitrary position, without computing the digits
+    before it, in roughly linear time and logarithmic memory. Nothing structurally similar is known in
+    base 10 &mdash; decimal digits are hard for the same reason a base-10 BBP formula for &pi; appears
+    not to exist (see the <a href="#postscript">postscript</a>). Getting a decimal digit therefore means
+    a different kind of algorithm: an accelerated series for &pi; itself, truncated and manipulated so
+    that only the digits you want fall out.</p>
+  <p>The timeline for that approach: Plouffe (1996) found a way to extract a decimal digit without
+    storing every digit before it, at roughly cubic time. Bellard (1997) brought that down to
+    O(n&sup2;)-ish time with O(log&nbsp;n) memory, no time&ndash;memory trade-off. Gourdon (2003) went
+    further: his Theorem 1 gets a decimal digit in O(n&sup2;&nbsp;loglog&nbsp;n&nbsp;/&nbsp;log&sup2;&nbsp;n)
+    time with O(log&sup2;&nbsp;n) memory &mdash; still effectively fixed, tiny memory, and it is the
+    method this site's own CLI implements as its non-default method (<code>--method thm1</code>). His
+    Theorem 2 is the subject of this page: the same digit, but with a memory budget <em>m</em> you can
+    dial up to trade for a large speed gain. He stated it. He did not publish how.</p>
+</section>
+
+<section id="claim">
+  <h2>The claim</h2>
+  <p>From Gourdon's 2003 preprint (Proposition 1 gives the working formula; the paragraph on
+    intermediate memory sizes states Theorem 2 without proof):</p>
+  <blockquote>
+    <p>With a memory budget of <em>m</em> bits (n<sup>&epsilon;</sup> &le; m &le; n), the <em>n</em>-th
+    decimal digit of &pi; can be computed with an O(m)-bit working set, in roughly
+    \(O\!\left(\dfrac{n^2 \log^3 n \operatorname{loglog} n}{m \log^2(n/m)}\right)\) time. &ldquo;Details of this algorithm will
+    [be] added soon.&rdquo;</p>
+  </blockquote>
+  <p>That follow-up never appeared. The PDF at Gourdon's own URL is unchanged since 12 Feb 2003 (same
+    9 pages, same creation date); the web version's TeX source has no commented-out details either. We
+    found no paper, thesis, program or forum post anywhere that gives Theorem 2's algorithm, or even
+    cites it with any detail beyond the one-paragraph statement above.</p>
+
+  <h3>What the literature has</h3>
+  <div class="table-scroll">
+  <table>
+    <caption class="visually-hidden">Sources checked for any trace of Gourdon's Theorem 2</caption>
+    <thead><tr><th scope="col">Source</th><th scope="col">What it contains</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>X. Gourdon, <cite>Computation of the n-th decimal digit of &pi; with low memory</cite>,
+          11&nbsp;Feb&nbsp;2003. PDF:
+          <a href="http://numbers.computation.free.fr/Constants/Algorithms/nthdecimaldigit.pdf">numbers.computation.free.fr</a>
+          (mirror:
+          <a href="http://www.plouffe.fr/simon/Citations/Computation%20of%20the%20n-th%20decimal%20digit%20of%20pi%20%20with%20low%20memory.pdf">plouffe.fr</a>,
+          <a href="https://www.scribd.com/document/558583751/nthdecimaldigit">Scribd copy</a>)</td>
+        <td>Theorem 1 in full; Theorem 2 stated only. Still dated 12&nbsp;Feb&nbsp;2003 (PDF
+          CreationDate), 9 pages, same text as ever. No later version exists at that URL.</td>
+      </tr>
+      <tr>
+        <td><a href="http://numbers.computation.free.fr/Constants/Algorithms/nthdigit.html">nthdigit.html</a>
+          and its TeX source <code>nthdigit.tex</code></td>
+        <td>Web version of the same text. &ldquo;Generalization for intermediate memory size&rdquo;
+          repeats the bound and says &ldquo;Details of this algorithm will added soon in [3]&rdquo;
+          ([3] = the 2003 preprint). The TeX has no commented-out details. Generated by TTH on
+          12&nbsp;Feb&nbsp;2003.</td>
+      </tr>
+      <tr>
+        <td>pidec (Gourdon's program, linked from the page above)</td>
+        <td>Theorem 1 only (per the paper's own timing section).</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/logc/pidec">github.com/logc/pidec</a></td>
+        <td>Racket digit extractor &ldquo;based on Fabrice Bellard's paper.&rdquo; Not Gourdon's
+          Theorem 2.</td>
+      </tr>
+      <tr>
+        <td>F. Bellard, <a href="https://bellard.org/pi/pi_n2/pi_n2.html">pi_n2.html</a>,
+          <code>pi.c</code>/<code>pi1.c</code></td>
+        <td>O(n&sup2;)-ish, O(log&nbsp;n)-memory decimal digit extraction. No trade-off.</td>
+      </tr>
+      <tr>
+        <td>S. Plouffe, <a href="https://arxiv.org/abs/0912.0303">arXiv:0912.0303</a> and
+          <a href="https://arxiv.org/abs/2201.12601">arXiv:2201.12601</a></td>
+        <td>Low-memory / formula-based n-th digit. No time&ndash;memory trade-off, no Theorem 2
+          details.</td>
+      </tr>
+      <tr>
+        <td>Cheng, Hanrot, Thom&eacute;, Zima, Zimmermann, <cite>Time- and space-efficient evaluation of
+          some hypergeometric constants</cite>, <a href="https://arxiv.org/abs/cs/0701151">arXiv:cs/0701151</a></td>
+        <td>Binary splitting with O(d) space for <em>all</em> first d digits. Doesn't cite Gourdon and
+          does no digit extraction. Relevant only as the &ldquo;m &approx; n&rdquo; end of the
+          trade-off.</td>
+      </tr>
+      <tr>
+        <td>Gourdon&ndash;Sebah truncation trick / Yakhontov,
+          <a href="https://arxiv.org/abs/1209.5097">arXiv:1209.5097</a></td>
+        <td>O(p)-space binary splitting for all digits. Same remark.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p>As far as we can tell, the reconstruction below is the only written version of Theorem 2's
+    algorithm anywhere.</p>
+</section>
+
+<section id="reconstruction">
+  <h2>The reconstruction</h2>
+  <p>Everything below is our own work: an algorithm we believe matches Gourdon's stated bound and is
+    plausibly close to what he had in mind, not a recovery of his actual method (which remains
+    unpublished). Claims are tagged
+    <span class="badge badge-proved">proved</span> (argued in full, either here or in the fuller
+    write-up), <span class="badge badge-measured">measured</span> (prototype or benchmark data), or
+    <span class="badge badge-conjecture">conjecture</span> (stated as a belief, not a proof).</p>
+
+  <h3>The accelerated series</h3>
+  <p>Start from Gourdon's Theorem 1 identity, a Cohen&ndash;Villegas&ndash;Zagier-accelerated form of
+    &pi;/4&nbsp;=&nbsp;&Sigma;(&minus;1)<sup>k</sup>/(2k+1):</p>
+  <p>
+  \[
+  S = \sum_{k=0}^{(M+1)N-1} (-1)^k \frac{4}{2k+1} \;-\; \sum_{k=0}^{N-1} (-1)^k \frac{4\,s_k}{2^N(2MN+2k+1)},
+  \qquad s_k = \sum_{j=0}^{k} \binom{N}{j}, \qquad |S-\pi| \le \frac{\pi}{(2eM)^N}.
+  \]
+  </p>
+  <p>Choosing M and N (both even, N&nbsp;&le;&nbsp;n+2) makes every quantity in sight an ordinary
+    machine-word modular fraction: Gourdon's Proposition 1 turns this into
+    frac(10<sup>n</sup>&pi;)&nbsp;&approx;&nbsp;frac(B&nbsp;&minus;&nbsp;C) with error &lt; 10<sup>&minus;n&#8320;</sup>,</p>
+  <p>
+  \[
+  B = \sum_{k&lt;(M+1)N} (-1)^k \frac{4\cdot 10^n \bmod (2k{+}1)}{2k+1}, \qquad
+  C = \sum_{k&lt;N} (-1)^k \frac{X\cdot s_k \bmod m_k}{m_k},
+  \]
+  </p>
+  <p>with X&nbsp;=&nbsp;5<sup>N&minus;2</sup>&middot;10<sup>n&minus;N+2</sup> and
+    m<sub>k</sub>&nbsp;=&nbsp;2MN+2k+1. Theorem 1 takes M&nbsp;&asymp;&nbsp;2n/log&sup3;n, so B is cheap
+    and C costs O(k) word operations per s<sub>k</sub> &mdash; that O(k) inner sum is exactly the cost
+    Theorem 2 needs to beat.</p>
+
+  <details>
+    <summary>Why &ldquo;blocking gains nothing&rdquo; doesn't hold <span class="badge badge-proved">proved</span></summary>
+    <p>The obvious objection to any memory-budget scheme: update an m-bit accumulator one small factor
+      at a time, and it costs O(m/w) work per factor (w = word size) &mdash; no better than doing it in
+      full precision. That's true for <em>naive</em> blocking. It's false for <strong>binary
+      splitting</strong>: the factors (N&minus;j+1) and j in the recurrence below are small integers
+      that don't depend on the block modulus, so g&nbsp;&approx;&nbsp;m/log&nbsp;n of them can be
+      multiplied together <em>exactly</em> with a product tree, costing O(M(m)&nbsp;log&nbsp;m) total
+      &mdash; polylog per factor instead of m/w &mdash; then reduced once mod the block modulus Q. With
+      fast (subquadratic) multiplication the cost per (term, j) pair drops from &Theta;(1) to
+      &Theta;(log&nbsp;n&middot;log&sup2;m/m). With schoolbook multiplication the gain collapses to a
+      constant, so the real requirement is subquadratic multiplication, not a cleverer accumulator.</p>
+  </details>
+
+  <h3>The (P, T, D) recurrence</h3>
+  <p>For target t, define state P<sub>t</sub>&nbsp;=&nbsp;N!/(N&minus;t)!, D<sub>t</sub>&nbsp;=&nbsp;t!,
+    T<sub>t</sub>&nbsp;=&nbsp;t!&middot;s<sub>t</sub>, with (P&#8320;,T&#8320;,D&#8320;)=(1,1,1). One step
+    (1&nbsp;&le;&nbsp;j) is P&nbsp;&larr;&nbsp;(N&minus;j+1)P; T&nbsp;&larr;&nbsp;jT+(N&minus;j+1)P<sub>old</sub>;
+    D&nbsp;&larr;&nbsp;jD. A block of steps composes as a triple (&alpha;,&delta;,&tau;) acting on
+    (P,T,D), and triples compose by standard binary splitting:
+    (&alpha;&#8321;&alpha;&#8322;, &delta;&#8321;&delta;&#8322;, &delta;&#8322;&tau;&#8321;+&tau;&#8322;&alpha;&#8321;).
+    Then s<sub>t</sub>&nbsp;&equiv;&nbsp;T<sub>t</sub>D<sub>t</sub><sup>&minus;1</sup> and
+    C(N,t)&nbsp;&equiv;&nbsp;P<sub>t</sub>D<sub>t</sub><sup>&minus;1</sup> mod q, whenever
+    gcd(q,&nbsp;t!)&nbsp;=&nbsp;1. The symmetry s<sub>k</sub>&nbsp;=&nbsp;2<sup>N</sup>&nbsp;&minus;&nbsp;s<sub>N&minus;1&minus;k</sub>
+    halves the targets that ever need computing.</p>
+
+  <h3>Partial fractions: main, Lucas, p-adic</h3>
+  <p>The obstacle Gourdon's obstacles list raises is real: m<sub>k</sub> can be composite and share
+    prime factors with t! (D<sub>t</sub> stops being invertible mod m<sub>k</sub>). The fix is to factor
+    m<sub>k</sub>&nbsp;=&nbsp;&Pi;p<sup>e</sup> and use partial fractions,
+    frac(Xs/m)&nbsp;=&nbsp;&Sigma;<sub>q</sub>&nbsp;frac(Xs&middot;((m/q)<sup>&minus;1</sup>&nbsp;mod&nbsp;q)/q),
+    handling each coprime part q by whichever of three methods is valid for it:</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th scope="col">Part</th><th scope="col">Condition</th><th scope="col">Method</th></tr></thead>
+    <tbody>
+      <tr><td>main</td><td>product of all p<sup>e</sup> with p&nbsp;&gt;&nbsp;t</td>
+        <td>the accumulating-remainder-tree item above (target t, modulus q) &mdash; D<sub>t</sub> is
+          invertible here by construction</td></tr>
+      <tr><td>Lucas</td><td>p&nbsp;&le;&nbsp;t, p&nbsp;&parallel;&nbsp;m<sub>k</sub></td>
+        <td>Lucas' theorem, reducing to one small residue mod p (below)</td></tr>
+      <tr><td>p-adic</td><td>p&nbsp;&le;&nbsp;t, p<sup>e</sup>&nbsp;&parallel;&nbsp;m<sub>k</sub>, e&nbsp;&ge;&nbsp;2</td>
+        <td>the p-adic Lucas recursion (below), no big numbers</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <details>
+    <summary>Lucas' theorem, applied <span class="badge badge-proved">proved</span></summary>
+    <p>Write digits N&nbsp;=&nbsp;&Sigma;N<sub>i</sub>p<sup>i</sup> and t&nbsp;=&nbsp;&Sigma;t<sub>i</sub>p<sup>i</sup>,
+      with G<sub>i</sub>(x)&nbsp;=&nbsp;&Sigma;<sub>y&lt;x</sub>C(N<sub>i</sub>,y)&nbsp;mod&nbsp;p:</p>
+    <p>
+    \[
+    s_t \equiv \sum_i \Big[\!\prod_{u>i} \binom{N_u}{t_u}\Big]\, G_i(t_i)\, 2^{\sum_{u&lt;i} N_u} \;+\; \prod_u \binom{N_u}{t_u} \pmod{p}.
+    \]
+    </p>
+    <p>For i&nbsp;=&nbsp;0, C(N&#8320;,y)&nbsp;&equiv;&nbsp;C(N,y) for y&nbsp;&lt;&nbsp;p, so
+      G&#8320;(t&#8320;) and C(N&#8320;,t&#8320;) both come straight from the main-item computation
+      above. For i&nbsp;&ge;&nbsp;1, N<sub>i</sub>&nbsp;&le;&nbsp;N/p<sup>i</sup>, so those rows cost
+      O(min(p,&nbsp;N/p)) per prime &mdash; this is Lucas' theorem plus a lexicographic split of
+      {j&nbsp;&le;&nbsp;t}.</p>
+  </details>
+
+  <details>
+    <summary>The p-adic Lucas recursion (p&sup2; case) <span class="badge badge-proved">proved</span></summary>
+    <p>Lucas' theorem alone breaks when p<sup>2</sup>&nbsp;&mid;&nbsp;m<sub>k</sub>: a single residue mod
+      p isn't enough. Write N&nbsp;=&nbsp;pK+N&#8320; and
+      g(x)&nbsp;=&nbsp;((1+x)<sup>p</sup>&minus;1&minus;x<sup>p</sup>)/p&nbsp;&isin;&nbsp;&#x2124;[x].
+      Then</p>
+    <p>
+    \[
+    (1+x)^N \equiv \sum_{i&lt;e} \binom{K}{i} p^i\, (1+x)^{N_0} g(x)^i (1+x^p)^{K-i} \pmod{p^e}.
+    \]
+    </p>
+    <p>Putting h<sub>i</sub>&nbsp;=&nbsp;(1+x)<sup>N&#8320;</sup>g<sup>i</sup> (degree &lt; (i+1)p, with
+      prefix sums H<sub>i</sub>) and t&nbsp;=&nbsp;pT+r gives a recursion on rows of size
+      &asymp;&nbsp;N/p, depth log<sub>p</sub>N, base case N&nbsp;&lt;&nbsp;p (fully invertible). At
+      e&nbsp;=&nbsp;1 this collapses back to plain Lucas. The prototype checked it against exact
+      binomials for 400 random (p, e, N, t) cases with p&nbsp;&le;&nbsp;101, e&nbsp;&le;&nbsp;4.</p>
+  </details>
+
+  <h3>The chunked accumulating remainder tree</h3>
+  <p>All of this is assembled by sorting every (target, modulus) item by target and cutting the sorted
+    list into chunks whose modulus product has &asymp;&nbsp;m bits. Each chunk builds a product tree of
+    its moduli, advances the (P,T,D) state to the chunk's first target by binary splitting in groups of
+    g&nbsp;=&nbsp;&lfloor;m/log&#8322;N&rfloor; steps, then descends the tree &mdash; at each node, the
+    left child inherits the state mod its own modulus, and the right child's state is advanced from the
+    left target to its own, mod its own (smaller) modulus. A leaf outputs (P,T,D) mod its item's
+    modulus. Nothing outside one chunk's O(m)-bit working set is ever held at once. In a
+    memory-faithful implementation, items are generated on the fly in target order via a segmented
+    sieve, rather than built as one global list up front &mdash; this streaming construction is what
+    <code>crates/pi-digits/src/nthdigit2.rs</code>'s <code>stream_needs_and_chunks</code> implements.</p>
+</section>
+
+<section id="complexity">
+  <h2>Complexity <span class="badge badge-proved">proved, modulo the stated model</span></h2>
+  <p>Model: w&nbsp;=&nbsp;&Theta;(log&nbsp;n)-bit words, and b-bit multiplication costs
+    M(b)&nbsp;=&nbsp;O(b&nbsp;log&nbsp;b&nbsp;loglog&nbsp;b) bit operations. Summing the
+    accumulating-remainder-tree cost, the Lucas/p-adic tables, and balancing the B and C parts of the
+    series against each other (M&nbsp;&asymp;&nbsp;max(4,&nbsp;c&middot;n/m)) gives:</p>
+  <p>
+  \[
+  T(n, m) = O\!\left( \frac{n^2 \cdot \log n \cdot \log^2 m \cdot \operatorname{loglog} m}{m \cdot \log^2(n/m)} \right) \text{ word operations, memory } O(m \log m) \text{ bits (}O(m)\text{ with care).}
+  \]
+  </p>
+  <p>For m&nbsp;=&nbsp;n<sup>&Theta;(1)</sup>, log&sup2;m&nbsp;=&nbsp;&Theta;(log&sup2;n), and this is
+    <strong>exactly Gourdon's stated bound</strong>. At m&nbsp;=&nbsp;&radic;n it gives
+    O(n<sup>3/2</sup>&nbsp;log&nbsp;n&nbsp;loglog&nbsp;n), his first special case. The
+    log&sup2;(n/m) denominator is the fingerprint: it comes from N&sup2; with
+    N&nbsp;&prop;&nbsp;n/log&nbsp;M and M&nbsp;&prop;&nbsp;n/m, i.e. directly from balancing B against a
+    binary-splitting C part &mdash; the same balancing act Theorem 1 already does, just with an
+    adjustable knob. <span class="badge badge-conjecture">conjecture</span> We're fairly confident this
+    is the algorithm Gourdon had in mind; his handling of small primes may have differed, and a loglog
+    from &Sigma;1/p (as in his own Lemma 1) would fit the same bound just as well.</p>
+</section>
+
+<section id="implementation">
+  <h2>Implementation</h2>
+  <p>The certification path is not behind any abstraction seam: it is plain u128 fixed-point integer
+    code, unchanged across bignum backends. Each term (x&nbsp;mod&nbsp;m)/m is stored as a u128
+    fixed-point fraction f/2<sup>128</sup>, computed by exact 128-by-64 long division, so its
+    representation error is &lt; 2<sup>&minus;128</sup> (one ulp). Terms accumulate via wrapping
+    add/subtract, which is exact arithmetic modulo 1 on this encoding, so accumulation order never
+    matters. The certification bound (<code>error_units</code>) adds one ulp per term to Gourdon's own
+    truncation bound &pi;/(2eM)<sup>N</sup>&nbsp;&lt;&nbsp;10<sup>&minus;(n+n&#8320;)</sup>; n&#8320; is
+    capped at 24, and long digit requests are split into independent chunks so no single evaluation
+    needs more precision than that.</p>
+  <p><code>digits(n, count)</code> never returns a digit it can't certify this way: it computes
+    x&nbsp;=&nbsp;frac_10n_pi(n,&nbsp;n&#8320;) with n&#8320;&nbsp;=&nbsp;count&nbsp;+&nbsp;guard
+    (guard starts at 4), then re-extracts the requested digits from x, x+err and x&minus;err. If all
+    three agree, the digits are certified; if the true value sits too close to a run of 9s or 0s for
+    the guard to resolve, the guard doubles and the whole computation retries.</p>
+
+  <h3>The memory story at n = 10&#8309;</h3>
+  <p><span class="badge badge-measured">measured</span> Three implementation stages, same position,
+    same machine, peak resident memory:</p>
+  <ul class="stat-list">
+    <li><strong>812.1&nbsp;MiB</strong> &mdash; the first port: a full O(N) factorisation table and a
+      full sorted item list, held before any chunk ran.</li>
+    <li><strong>447&nbsp;MiB</strong> &mdash; after streaming item generation removed the global
+      tables, generating chunks on the fly.</li>
+    <li><strong>69.2&nbsp;MiB</strong> &mdash; after a memory-profiling pass found the streamed
+      version's real remaining cost wasn't where its own docs blamed it: a p-adic recursion memo table
+      that leaked across an entire prime's worth of queries instead of clearing between them (roughly
+      40 of 58&nbsp;MiB at n=10&#8310; on its own), and small-prime need-lists that stored every
+      matching (k,t) pair instead of the compact arithmetic-progression range each one actually forms.
+      Both fixed.</li>
+  </ul>
+  <p>What's left, and still genuinely O(N) rather than O(m): each target's <em>cofactor</em> &mdash;
+    the single leftover prime factor of m<sub>k</sub> above &radic;(max&nbsp;m<sub>k</sub>), when there
+    is one. Unlike a small sieve prime, a cofactor is essentially unique to its own k (or its mirror),
+    not shared by a residue-class arithmetic progression, so it resists the same compaction the small
+    primes got. It is now the dominant <em>named</em> remaining term but is small in absolute terms
+    &mdash; tens of MiB, not hundreds, through n&nbsp;=&nbsp;10&#8311;. Eliminating it fully would need
+    an external (disk-backed) sort of cofactor needs by target, or a classification that doesn't
+    require computing a cofactor's value before knowing whether it counts as small; neither is
+    implemented.</p>
+</section>
+
+<section id="benchmarks">
+  <h2>Benchmarks</h2>
+  <p><span class="badge badge-measured">measured</span> AMD Ryzen 7 5700G, 6 cores, 2026-09-23. Gourdon's
+    own <code>pidec</code> figures (Pentium&nbsp;III&nbsp;900&nbsp;MHz, 2003, Theorem 1 only) are
+    included for historical reference &mdash; not an apples-to-apples comparison across ~25 years and
+    two different implementations, but the only published timing baseline for this problem.</p>
+
+  <figure class="chart-figure">
+    <figcaption>Wall-clock time vs digit position (log&ndash;log)</figcaption>
+    <!-- CHART:time -->
+  </figure>
+
+  <figure class="chart-figure">
+    <figcaption>Peak memory vs digit position (log&ndash;log)</figcaption>
+    <!-- CHART:memory -->
+  </figure>
+
+  <div class="table-scroll">
+  <table class="numeric-table">
+    <caption class="visually-hidden">Benchmark table: time and memory for Theorem 1, Theorem 2, and Gourdon's pidec</caption>
+    <thead>
+      <tr>
+        <th scope="col">Position n</th>
+        <th scope="col">Theorem 1 time</th>
+        <th scope="col">Theorem 1 memory</th>
+        <th scope="col">Theorem 2 time</th>
+        <th scope="col">Theorem 2 memory</th>
+        <th scope="col">pidec 2003 (P3, Thm 1 only)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>10,000</td><td>34&nbsp;ms</td><td>5.2&nbsp;MiB</td><td>16&nbsp;ms</td><td>5.7&nbsp;MiB</td><td>3.13&nbsp;s</td></tr>
+      <tr><td>100,000</td><td>1.51&nbsp;s</td><td>5.1&nbsp;MiB</td><td>217&nbsp;ms</td><td>7.3&nbsp;MiB</td><td>185.1&nbsp;s</td></tr>
+      <tr><td>1,000,000</td><td>113.4&nbsp;s</td><td>5.0&nbsp;MiB</td><td>4.17&nbsp;s</td><td>14.1&nbsp;MiB</td><td>15,869&nbsp;s (4h&nbsp;24m)</td></tr>
+      <tr><td>3,000,000</td><td>&mdash;</td><td>&mdash;</td><td>19.3&nbsp;s</td><td>22.7&nbsp;MiB</td><td>&mdash;</td></tr>
+      <tr><td>10,000,000</td><td>7,107&nbsp;s (1h&nbsp;58m)</td><td>4.2&nbsp;MiB</td><td>111.0&nbsp;s (1m&nbsp;51s)</td><td>69.2&nbsp;MiB</td><td>&mdash;</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="fine-print">Theorem 2's memory grows with position (it's the whole point &mdash; it's
+    spending memory to buy speed); Theorem 1's stays flat at a few MiB, genuinely O(log&sup2;&nbsp;n).
+    Theorem 2 is faster at every position measured from 10,000 up, by a growing margin: about 2&times;
+    at 10,000, roughly 64&times; at 10,000,000.</p>
+</section>
+
+<section id="verification">
+  <h2>Verification</h2>
+
+  <h3>Position convention</h3>
+  <p>Two conventions coexist and are easy to conflate: the CLI's <code>pihunt digit &lt;pos&gt;</code>
+    is 1-based (position 1 is the first digit after the decimal point); the library functions
+    (<code>nthdigit::digits</code>, <code>nthdigit2::digits</code>) return positions
+    n+1&nbsp;..=&nbsp;n+count, so the CLI calls them with n&nbsp;=&nbsp;pos&nbsp;&minus;&nbsp;1. Every
+    digit string on this page is a <strong>CLI</strong> position.</p>
+  <div class="table-scroll">
+  <table class="numeric-table">
+    <caption class="visually-hidden">Digits at each CLI position, and at position+1, for cross-checking the convention</caption>
+    <thead><tr><th scope="col"><code>pihunt digit</code> position</th><th scope="col">digits</th><th scope="col">position&nbsp;+&nbsp;1</th></tr></thead>
+    <tbody>
+      <tr><td>10<sup>4</sup></td><td class="digits">8566722796</td><td class="digits">5667227966</td></tr>
+      <tr><td>10<sup>5</sup></td><td class="digits">6412600243</td><td class="digits">4126002437</td></tr>
+      <tr><td>10<sup>6</sup></td><td class="digits">1309275628</td><td class="digits">3092756283</td></tr>
+      <tr><td>3&middot;10<sup>6</sup></td><td class="digits">3697067915</td><td class="digits">6970679155</td></tr>
+      <tr><td>10<sup>7</sup></td><td class="digits">7259151336</td><td class="digits">2591513361</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="fine-print">10&#8308;&ndash;3&middot;10&#8310; regenerated with the CLI on 2026-09-23,
+    Theorem 1 and 2 agreeing; 10&#8311; both columns MPFR-verified.</p>
+
+  <h3>MPFR agreement</h3>
+  <p><span class="badge badge-measured">measured</span> Both theorems' digits are checked against MPFR
+    (via <code>rug</code>) at positions 10&#8308;, 10&#8310;, and independently cross-checked with a
+    second binding, gmpy2's <code>const_pi</code>, at 10&#8310; and 10&#8311;. All agree, and Theorem 1
+    and Theorem 2 agree with each other at every position tested, including the Feynman point (position
+    762, a run of six 9s) and hundreds of sequential and random positions up to 20,000 and beyond, across
+    multiple memory-budget settings for Theorem 2. The full <code>pi-digits</code> suite runs a second
+    time with a completely independent pure-Rust bignum backend (no GMP), still checked against MPFR,
+    to catch anything backend-specific.</p>
+
+  <h3>Browser checks</h3>
+  <p>The race panel above compares the two WebAssembly lanes directly and flags any disagreement; for
+    positions up to 200,000 it also checks the result against a shipped reference file
+    (<code>pi-200k.txt</code>), independently generated and MPFR cross-checked, marking each run &#10003;
+    or &#10007;.</p>
+
+  <h3>Errors we caught</h3>
+  <p>Three real mistakes surfaced during this work, in the interest of being honest about how this
+    reconstruction was actually built:</p>
+  <ul class="error-list">
+    <li><strong>A missing rounding term in the certification bound.</strong> An earlier version of the
+      error budget omitted the one-ulp-per-term fixed-point rounding contribution. It was only unsound
+      for n&#8320;&nbsp;&gtrsim;&nbsp;28 &mdash; long <code>--count</code> requests or a pathological
+      boundary retry &mdash; caught in review and fixed.</li>
+    <li><strong>Doc position labels mixing the CLI and library conventions.</strong> One session briefly
+      relabelled the 10<sup>7</sup> row as <code>2591513361</code>. That value is correct too &mdash;
+      it's <code>pihunt digit 10000001</code>, the library call at n=10,000,000, one position later than
+      every other row &mdash; but nothing was wrong in the code, only the label. Both 10<sup>7</sup>
+      strings are MPFR-verified (see the table above).</li>
+    <li><strong>A verification script that used <code>int()</code> on gmpy2 floating-point values,</strong>
+      which rounds to the nearest integer rather than truncating toward zero. A digit-extraction check
+      built on that assumption can silently read off the wrong last digit at a rounding boundary; fixed
+      by truncating explicitly instead of relying on gmpy2's <code>int()</code>.</li>
+  </ul>
+</section>
+
+<section id="limits">
+  <h2>Limits and caveats</h2>
+  <ul>
+    <li><span class="badge badge-measured">measured</span> Memory is not the strict O(m) the bound
+      promises in the asymptotic sense: the cofactor term above is still O(N), just small in practice
+      (tens of MiB, not hundreds, through n&nbsp;=&nbsp;10&#8311;). It hasn't been tested at, say,
+      n&nbsp;=&nbsp;10&#8313;.</li>
+    <li>This is a <strong>reconstruction and a verified implementation</strong>, not a formal proof that
+      it matches Gourdon's own method, and not a claim that his proof (which we've never seen) looked
+      like this one.</li>
+    <li><span class="badge badge-conjecture">conjecture</span> That this is close to Gourdon's own
+      unpublished algorithm is a belief, not a fact &mdash; it's unknowable without his notes. What's
+      provable is that this algorithm achieves his stated bound.</li>
+    <li>The p-adic tables are O(p) words in principle, with p reaching &radic;(2(M+1)N); in practice
+      p-adic treatment only ever applies to primes &le;&nbsp;&radic;(max&nbsp;m<sub>k</sub>), so the
+      measured peak is far smaller than the theoretical worst case.</li>
+  </ul>
+</section>
+
+<section id="reproduce">
+  <h2>Reproduce it</h2>
+  <p>This all lives in the pihunt source tree, in <code>crates/pi-digits/src/nthdigit.rs</code>
+    (Theorem 1) and <code>crates/pi-digits/src/nthdigit2.rs</code> (Theorem 2). Theorem 2 is the CLI's
+    default method.</p>
+  <pre><code>cargo build --release
+
+# Theorem 2 (default)
+pihunt digit 1000000
+
+# Theorem 1, for comparison
+pihunt digit 1000000 --method thm1
+
+# full test suite
+cargo test --release -j 4</code></pre>
+</section>
+
+<section id="postscript">
+  <h2>Postscript: the base-10 BBP hunt</h2>
+  <p>Before this, the same tooling searched for a base-10 BBP-type formula for &pi; &mdash; a series
+    that would give decimal digits as directly as BBP gives hex ones. Over two thousand candidate shapes
+    were searched with PSLQ across bases 10, 100 and 1000, with degrees up to 3 and extra constants
+    (log&nbsp;2, log&nbsp;3, log&nbsp;5, &pi;&sup2;, Catalan's constant, &zeta;(3)); every candidate
+    relation was re-verified at twice the search's working precision. Nothing was found. Degree-1 (Machin-type) formulas for
+    &pi; are already excluded in any base that isn't a power of two (Borwein, Borwein &amp; Galway,
+    2004), and higher-degree columns are periods of higher weight than &pi; itself &mdash; conditionally
+    on a standard, unproved conjecture about weights of periods, any relation would have to reduce to a
+    degree-1 one anyway, which is already ruled out. So the search's null result is what the weight
+    argument predicts, not a surprise waiting to be overturned by more CPU time. That's the closed
+    finding that pointed this project at attacking the <em>cost</em> of existing decimal digit
+    extraction instead &mdash; which is what Theorem 2 is.</p>
+</section>
+
+<section id="references">
+  <h2>References</h2>
+  <ul class="reference-list">
+    <li>X. Gourdon, <cite>Computation of the n-th decimal digit of &pi; with low memory</cite>, 11&nbsp;Feb&nbsp;2003.
+      <a href="http://numbers.computation.free.fr/Constants/Algorithms/nthdecimaldigit.pdf">PDF</a>.</li>
+    <li>F. Bellard, <a href="https://bellard.org/pi/pi_n2/pi_n2.html">Computation of the n'th digit of pi in any base in O(n&sup2;)</a>.</li>
+    <li>S. Plouffe, <a href="https://arxiv.org/abs/0912.0303">arXiv:0912.0303</a>;
+      <a href="https://arxiv.org/abs/2201.12601">arXiv:2201.12601</a>.</li>
+    <li>Y. Cheng, G. Hanrot, E. Thom&eacute;, E. Zima, P. Zimmermann, <cite>Time- and space-efficient evaluation of some hypergeometric constants</cite>,
+      <a href="https://arxiv.org/abs/cs/0701151">arXiv:cs/0701151</a>.</li>
+    <li>V. Yakhontov, <a href="https://arxiv.org/abs/1209.5097">arXiv:1209.5097</a>.</li>
+    <li>D. Bailey, P. Borwein, S. Plouffe, <cite>On the Rapid Computation of Various Polylogarithmic
+      Constants</cite>, Math. Comp. 66 (1997) &mdash; the BBP formula.</li>
+    <li>J. Borwein, P. Borwein, W. Galway, <cite>Finding and excluding b-ary Machin-type BBP formulae</cite>,
+      Canad. J. Math. 56 (2004).</li>
+  </ul>
+</section>
+
+</article>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap wrap-wide">
+    <p>Static site, no analytics, no third-party requests. Built with vendored KaTeX, Inter and
+      JetBrains Mono.</p>
+  </div>
+</footer>
+
+<script src="./vendor/katex/katex.min.js"></script>
+<script src="./vendor/katex/contrib/auto-render.min.js"></script>
+<script src="./math.js"></script>
+<script src="./theme.js"></script>
 <script type="module" src="./demo.js"></script>
 </body>
 </html>
