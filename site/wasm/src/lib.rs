@@ -10,7 +10,7 @@ const MAX_POS: f64 = 200_000.0;
 /// `pi_digits` functions take). Rejects non-finite, non-integer, or out-of-range values with a
 /// JS `Error` rather than panicking or silently truncating.
 fn check_pos(pos: f64) -> Result<u64, JsError> {
-    if !(pos.is_finite() && pos.fract() == 0.0 && pos >= 1.0 && pos <= MAX_POS) {
+    if !(pos.is_finite() && pos.fract() == 0.0 && (1.0..=MAX_POS).contains(&pos)) {
         return Err(JsError::new("position must be an integer in 1..=200000"));
     }
     Ok(pos as u64)
