@@ -62,6 +62,20 @@ export function lanesAgree(a, b) {
   return a === b;
 }
 
+/**
+ * Whether this environment can run the live demo: both WebAssembly and Web Workers must be
+ * available. Checked once at demo init (see `initDemo`'s `showUnsupported`/support-gate below);
+ * `new Worker(...)` can still fail at call time even when this check passes (e.g. a restrictive
+ * CSP or an embedder-specific quirk), so call sites also catch that separately rather than
+ * relying on this check alone.
+ * @param {{WebAssembly?: unknown, Worker?: unknown}} [g] the global object to check (defaults
+ *   to `globalThis`; parameterised so this stays pure/testable from Node without a real DOM)
+ * @returns {boolean}
+ */
+export function browserSupportsDemo(g = globalThis) {
+  return typeof g.WebAssembly === 'object' && typeof g.Worker === 'function';
+}
+
 // --- Internal helpers --------------------------------------------------------
 
 function groupDigits(str, size = 10) {
@@ -153,6 +167,28 @@ function initDemo() {
     if (lane._raf) cancelAnimationFrame(lane._raf);
   }
 
+  // Spec §2 "Failure handling": when WASM or Web Workers aren't available, show a plain
+  // message (linking to the benchmark table and #reproduce) instead of a dead demo, disable
+  // the controls, and stop any lane timer already ticking. `activeLanes` lets call sites that
+  // discover unsupported-ness mid-race (a `new Worker` throw after one lane's timer already
+  // started) register their lanes here so this can stop them too.
+  let activeLanes = [];
+
+  function showUnsupported() {
+    const el = document.getElementById('demo-unsupported');
+    if (el) el.classList.remove('hidden');
+    for (const btn of document.querySelectorAll('#race-panel button, #stream-panel button')) {
+      btn.disabled = true;
+    }
+    for (const lane of activeLanes) stopLaneTimer(lane);
+    activeLanes = [];
+  }
+
+  if (!browserSupportsDemo()) {
+    showUnsupported();
+    return;
+  }
+
   initRacePanel();
   initStreamPanel();
 
@@ -232,14 +268,24 @@ function initDemo() {
       referenceEl.className = '';
 
       raceState = { runId, pos: parsed.pos, results: {} };
+      activeLanes = [];
 
       for (const [method, lane] of Object.entries(lanes)) {
         lane.digitsEl.textContent = '';
         lane.msEl.textContent = '–';
         lane.memEl.textContent = '–';
         startLaneTimer(lane, runId);
+        activeLanes.push(lane);
 
-        const worker = new Worker('./worker.js', { type: 'module' });
+        let worker;
+        try {
+          worker = new Worker('./worker.js', { type: 'module' });
+        } catch {
+          // Web Workers didn't actually work despite passing the init-time check (a
+          // restrictive CSP, an embedder quirk, etc.) — stop here rather than limp along.
+          showUnsupported();
+          return;
+        }
         liveWorkers.push(worker);
         worker.onmessage = ({ data }) => {
           if (data.run !== currentRun) return;
@@ -344,7 +390,13 @@ function initDemo() {
       outputEl.textContent = '';
       memEl.textContent = '–';
 
-      const worker = new Worker('./worker.js', { type: 'module' });
+      let worker;
+      try {
+        worker = new Worker('./worker.js', { type: 'module' });
+      } catch {
+        showUnsupported();
+        return;
+      }
       liveWorkers.push(worker);
       worker.onmessage = ({ data }) => {
         if (data.run !== currentRun) return;
@@ -355,6 +407,8 @@ function initDemo() {
           outputEl.appendChild(block);
           memEl.textContent = formatKiB(data.memBytes);
         } else if (data.type === 'error') {
+          setError(data.message);
+        } else if (data.type === 'end') {
           setError(data.message);
         }
       };

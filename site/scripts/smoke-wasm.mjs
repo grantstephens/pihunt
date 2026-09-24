@@ -17,5 +17,10 @@ for (const pos of [1, 5, 762, 1999, 2000, 2001, 10000, 50000]) {
 for (const bad of [0, -1, 1.5, 200001, NaN]) {
   try { digits_thm1(bad, 10); failed++; console.error(`FAIL: pos=${bad} accepted`); } catch { /* expected */ }
 }
+// pos itself is valid (<=200000), but pos + count - 1 overruns the 200,000-digit demo range.
+for (const [name, f] of [['thm1', digits_thm1], ['thm2', digits_thm2]]) {
+  try { f(199995, 10); failed++; console.error(`FAIL ${name}: pos=199995 count=10 (overruns 200000) accepted`); } catch { /* expected */ }
+  try { f(200000, 0); failed++; console.error(`FAIL ${name}: count=0 accepted`); } catch { /* expected */ }
+}
 if (failed) { console.error(`${failed} failure(s)`); process.exit(1); }
-console.log('wasm smoke test: all positions match pi-200k.txt; bad positions rejected');
+console.log('wasm smoke test: all positions match pi-200k.txt; bad positions and count overflow rejected');

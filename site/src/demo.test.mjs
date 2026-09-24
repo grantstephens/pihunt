@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePosition, checkAgainstReference, lanesAgree } from './demo.js';
+import { parsePosition, checkAgainstReference, lanesAgree, browserSupportsDemo } from './demo.js';
 
 test('parsePosition accepts plain integers in range', () => {
   assert.deepEqual(parsePosition('1'), { ok: true, pos: 1 });

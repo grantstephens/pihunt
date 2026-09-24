@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Decimal digits of &pi; in O(&radic;n) memory</title>
 <meta name="description" content="A reconstruction and verified Rust implementation of Xavier Gourdon's unpublished 2003 Theorem 2 for computing decimal digits of &pi; with O(m) memory, plus a live in-browser demo.">
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="./vendor/katex/katex.min.css">
 <link rel="stylesheet" href="./style.css">
 </head>
@@ -53,6 +54,11 @@
     <a href="#benchmarks">benchmark table</a> below for measured performance, or build the CLI
     yourself &mdash; see <a href="#reproduce">Reproduce it</a>.</p>
   </noscript>
+  <div id="demo-unsupported" class="notice hidden">
+    <p>This browser can&rsquo;t run the live demo (WebAssembly or Web Workers aren&rsquo;t
+    available here). See the <a href="#benchmarks">benchmark table</a> below for measured
+    performance, or build the CLI yourself &mdash; see <a href="#reproduce">Reproduce it</a>.</p>
+  </div>
 
   <section id="race-panel">
     <h2>Race: Theorem 1 vs Theorem 2</h2>
@@ -60,10 +66,15 @@
       WebAssembly build of the code the CLI uses &mdash; one running Theorem 1 (the classical,
       O(log&sup2;&nbsp;n)-memory method), the other Theorem 2 (this reconstruction). Positions up to
       200,000 are checked live against a shipped reference file.</p>
+    <p class="fine-print">Positions up to 2,000 are computed by the same exact fallback
+      (<code>pi_ref</code>, an integer Machin sum) in <em>both</em> lanes, not by either
+      theorem, so a race below 2,000 (e.g. the 1,000 preset) times identical code twice; it's
+      kept as a preset because it's a fast, always-available sanity check, but a race above
+      2,000 is the one that actually compares the two theorems.</p>
     <fieldset>
       <legend>Position</legend>
       <label for="race-pos">Position (1&ndash;200,000)</label>
-      <input type="text" id="race-pos" value="1000" inputmode="numeric" autocomplete="off">
+      <input type="text" id="race-pos" value="10000" inputmode="numeric" autocomplete="off">
       <button type="button" data-race-preset="1000">1,000</button>
       <button type="button" data-race-preset="10000">10,000</button>
       <button type="button" data-race-preset="50000">50,000</button>
@@ -98,10 +109,14 @@
     <p>Computes successive 10-digit blocks from scratch, one after another, using Theorem 1, never
       holding earlier digits in memory &mdash; the &ldquo;keep churning&rdquo; case that started this
       whole project.</p>
+    <p class="fine-print">The first ~200 blocks (positions up to 2,000) are computed by the
+      same exact <code>pi_ref</code> fallback every other small position uses, not by Theorem
+      1's Gourdon method proper; the stream starts at 10,001 by default so it opens on
+      Theorem 1 itself.</p>
     <fieldset>
       <legend>Start position</legend>
       <label for="stream-pos">Start position (1&ndash;200,000)</label>
-      <input type="text" id="stream-pos" value="1" inputmode="numeric" autocomplete="off">
+      <input type="text" id="stream-pos" value="10001" inputmode="numeric" autocomplete="off">
       <button type="button" id="stream-start" class="btn-primary">Start</button>
       <button type="button" id="stream-stop">Stop</button>
       <p id="stream-error" class="error hidden"></p>
@@ -341,7 +356,8 @@
   <p>Model: w&nbsp;=&nbsp;&Theta;(log&nbsp;n)-bit words, and b-bit multiplication costs
     M(b)&nbsp;=&nbsp;O(b&nbsp;log&nbsp;b&nbsp;loglog&nbsp;b) bit operations. Summing the
     accumulating-remainder-tree cost, the Lucas/p-adic tables, and balancing the B and C parts of the
-    series against each other (M&nbsp;&asymp;&nbsp;max(4,&nbsp;c&middot;n/m)) gives:</p>
+    series against each other (M&nbsp;=&nbsp;&Theta;(max(4,&nbsp;N&nbsp;log&sup2;m&nbsp;loglog&nbsp;m&nbsp;/&nbsp;m)),
+    i.e. M&nbsp;&prop;&nbsp;n/m up to logs) gives:</p>
   <p>
   \[
   T(n, m) = O\!\left( \frac{n^2 \cdot \log n \cdot \log^2 m \cdot \operatorname{loglog} m}{m \cdot \log^2(n/m)} \right) \text{ word operations, memory } O(m \log m) \text{ bits (}O(m)\text{ with care).}
@@ -368,22 +384,31 @@
     matters. The certification bound (<code>error_units</code>) adds one ulp per term to Gourdon's own
     truncation bound &pi;/(2eM)<sup>N</sup>&nbsp;&lt;&nbsp;10<sup>&minus;(n+n&#8320;)</sup>; n&#8320; is
     capped at 24, and long digit requests are split into independent chunks so no single evaluation
-    needs more precision than that.</p>
+    needs more precision than that. Two cases fall outside this fixed-point loop entirely and go to
+    an exact fallback instead, itself certified the same way (agreement across a verified
+    bracket, guard doubled and retried on disagreement): small positions (below 2,000, where
+    Gourdon's method doesn't apply), and a rare boundary case at any position where a long run of
+    equal digits pushes n&#8320; past what the u128 accumulator can certify. Both use an exact
+    integer Machin sum (<code>pi_ref</code>); the rare large-n boundary case uses MPFR instead
+    under the native CLI's <code>gmp</code> backend, where it's much faster.</p>
   <p><code>digits(n, count)</code> never returns a digit it can't certify this way: it computes
     x&nbsp;=&nbsp;frac_10n_pi(n,&nbsp;n&#8320;) with n&#8320;&nbsp;=&nbsp;count&nbsp;+&nbsp;guard
     (guard starts at 4), then re-extracts the requested digits from x, x+err and x&minus;err. If all
     three agree, the digits are certified; if the true value sits too close to a run of 9s or 0s for
     the guard to resolve, the guard doubles and the whole computation retries.</p>
 
-  <h3>The memory story at n = 10&#8309;</h3>
-  <p><span class="badge badge-measured">measured</span> Three implementation stages, same position,
-    same machine, peak resident memory:</p>
+  <h3>The memory story at n = 10&#8311;</h3>
+  <p>Three implementation stages, same position, same machine, peak resident memory:</p>
   <ul class="stat-list">
-    <li><strong>812.1&nbsp;MiB</strong> &mdash; the first port: a full O(N) factorisation table and a
-      full sorted item list, held before any chunk ran.</li>
-    <li><strong>447&nbsp;MiB</strong> &mdash; after streaming item generation removed the global
-      tables, generating chunks on the fly.</li>
-    <li><strong>69.2&nbsp;MiB</strong> &mdash; after a memory-profiling pass found the streamed
+    <li><span class="badge badge-measured">measured</span> <strong>812.1&nbsp;MiB</strong> &mdash;
+      the first port: a full O(N) factorisation table and a full sorted item list, held before
+      any chunk ran.</li>
+    <li><strong>447&nbsp;MiB</strong> (reported, not re-measured here) &mdash; after streaming
+      item generation removed the global tables, generating chunks on the fly. This is the
+      task brief's own figure for that intermediate stage; see <code>docs/nthdigit.md</code>
+      for why it wasn't separately re-derived.</li>
+    <li><span class="badge badge-measured">measured</span> <strong>69.2&nbsp;MiB</strong> &mdash;
+      after a memory-profiling pass found the streamed
       version's real remaining cost wasn't where its own docs blamed it: a p-adic recursion memo table
       that leaked across an entire prime's worth of queries instead of clearing between them (roughly
       40 of 58&nbsp;MiB at n=10&#8310; on its own), and small-prime need-lists that stored every
@@ -473,8 +498,8 @@
 
   <h3>MPFR agreement</h3>
   <p><span class="badge badge-measured">measured</span> Both theorems' digits are checked against MPFR
-    (via <code>rug</code>) at positions 10&#8308;, 10&#8310;, and independently cross-checked with a
-    second binding, gmpy2's <code>const_pi</code>, at 10&#8310; and 10&#8311;. All agree, and Theorem 1
+    (via <code>rug</code>) at positions 10&#8308;, 10&#8309; and 10&#8310;, and independently cross-checked
+    with a second binding, gmpy2's <code>const_pi</code>, at 10&#8310; and 10&#8311;. All agree, and Theorem 1
     and Theorem 2 agree with each other at every position tested, including the Feynman point (position
     762, a run of six 9s) and hundreds of sequential and random positions up to 20,000 and beyond, across
     multiple memory-budget settings for Theorem 2. The full <code>pi-digits</code> suite runs a second
@@ -554,9 +579,11 @@ cargo test --release -j 4</code></pre>
     2004), and higher-degree columns are periods of higher weight than &pi; itself &mdash; conditionally
     on a standard, unproved conjecture about weights of periods, any relation would have to reduce to a
     degree-1 one anyway, which is already ruled out. So the search's null result is what the weight
-    argument predicts, not a surprise waiting to be overturned by more CPU time. That's the closed
-    finding that pointed this project at attacking the <em>cost</em> of existing decimal digit
-    extraction instead &mdash; which is what Theorem 2 is.</p>
+    argument predicts, not a surprise waiting to be overturned by more CPU time. Stated plainly, the
+    degree-1 exclusion itself is not fully checked either: it's unverified whether the
+    Borwein&ndash;Borwein&ndash;Galway theorem covers <em>every</em> degree-1 BBP shape or only the
+    Machin-type subfamily. That's the closed finding that pointed this project at attacking the
+    <em>cost</em> of existing decimal digit extraction instead &mdash; which is what Theorem 2 is.</p>
 </section>
 
 <section id="references">

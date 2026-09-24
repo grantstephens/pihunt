@@ -100,7 +100,7 @@ pub struct Params {
 impl Params {
     /// Computes `M`, `N` per Gourdon eq. (8). Panics if `N > n + 2` (Gourdon: this holds
     /// once `n >= 4*n0` or so; too-small `n` for the requested `n0` should use the direct
-    /// MPFR fallback instead, see [`digits`]).
+    /// exact fallback instead ([`crate::pi_ref::digits`], via [`digits`]).
     pub fn new(n: u64, n0: u32) -> Self {
         assert!(n >= 1, "n must be >= 1");
         let nf = n as f64;
@@ -124,7 +124,7 @@ impl Params {
         assert!(
             big_n <= n + 2,
             "N={big_n} exceeds n+2={} for n={n}, n0={n0}: n is too small for the requested \
-             precision (Gourdon requires roughly n >= 4*n0); use the MPFR fallback instead",
+             precision (Gourdon requires roughly n >= 4*n0); use the exact fallback instead",
             n + 2
         );
 
@@ -749,7 +749,8 @@ pub fn profile_totals_ns() -> (u64, u64) {
 
 /// `frac(10^n π)` to within `10^-n0`, as a 128-bit fixed-point fraction (value = `x /
 /// 2^128`). Requires `n` large enough that [`Params::new`] doesn't panic (roughly `n >=
-/// 4*n0`); see [`digits`] for a version with an MPFR fallback for small `n`.
+/// 4*n0`); see [`digits`] for a version with an exact fallback (`pi_ref`; MPFR under `gmp`
+/// for the rare large-n boundary case) for small `n`.
 pub fn frac_10n_pi(n: u64, n0: u32) -> u128 {
     let p = Params::new(n, n0);
     let terms = (p.m + 1) * p.big_n;
@@ -809,15 +810,17 @@ pub(crate) const MAX_N0: u32 = 24;
 /// Most digits one evaluation hands out; longer requests are split (see [`digits`]).
 pub(crate) const CHUNK: usize = 16;
 
-/// Below this position, just ask MPFR for π directly — it's cheap there, and it sidesteps
-/// [`Params::new`]'s `N <= n + 2` precondition for small `n`.
+/// Below this position, just ask [`crate::pi_ref::digits`] (exact Machin sum) for π
+/// directly — it's cheap there, and it sidesteps [`Params::new`]'s `N <= n + 2` precondition
+/// for small `n`.
 pub(crate) const SMALL_N_THRESHOLD: u64 = 2000;
 
 /// `count` decimal digits of π at positions `n+1 ..= n+count` after the decimal point
 /// (position 1 is the '1' in 3.14159...).
 ///
 /// For small `n` (below [`SMALL_N_THRESHOLD`], or too small relative to `count` for
-/// Gourdon's method to apply), falls back to computing π directly with MPFR. Otherwise
+/// Gourdon's method to apply), falls back to the exact `pi_ref` fallback (MPFR is used only
+/// for a separate, rare large-n boundary case — see [`digits_fallback`]). Otherwise
 /// uses [`frac_10n_pi`] with a guard band of extra digits, doubling the guard and retrying
 /// whenever the requested digits are too close to a rounding boundary to certify (see the
 /// module docs).
@@ -878,21 +881,100 @@ pub(crate) fn digits_fallback(n: u64, count: usize) -> String {
     digits_fallback_large_n(n, count)
 }
 
+/// `x`'s decimal string, left-padded with zeros to `width` digits, then sliced to
+/// `[start, end)`. Shared helper for [`certify_window`] below (mirrors
+/// [`crate::pi_ref::digits`]'s own `extract`, but over a plain `Integer` instead of `Big`).
+#[cfg(feature = "gmp")]
+fn integer_digit_window(x: &Integer, width: usize, start: usize, end: usize) -> String {
+    let s = x.to_string();
+    let s = if s.len() < width {
+        format!("{}{s}", "0".repeat(width - s.len()))
+    } else {
+        s
+    };
+    s[start..end].to_string()
+}
+
+/// Certifies a digit window `[start, end)` (out of `width` total decimal digits) given a
+/// verified bracket `[value, value + err]` (`err >= 0`) that is known to contain the true
+/// integer (e.g. `floor(pi * 10^total)`): returns the window if it's the same read from both
+/// ends of the bracket, `None` otherwise.
+///
+/// This is the same "agree at both ends or refuse" certification [`crate::pi_ref::digits`]
+/// and [`digits`] (above) use via their own `base`/`plus`/`minus` checks: since decimal digit
+/// extraction only ever changes, as the underlying integer increases by 1, by a carry running
+/// through some suffix of digits, two brackets that already agree on `[start, end)` force
+/// every integer strictly between them to agree too — so if the true value lies in `[value,
+/// value + err]` and both ends of that range share the same window, the true value's window
+/// must be that one. If they don't agree, the true value might sit inside a carry (e.g. a run
+/// of `9`s rolling over to `0`s) somewhere in `[start, end)`, and this function refuses rather
+/// than guess which side of it the truth falls on.
+#[cfg(feature = "gmp")]
+fn certify_window(value: &Integer, err: &Integer, width: usize, start: usize, end: usize) -> Option<String> {
+    debug_assert!(*err >= 0, "err must be non-negative");
+    let lo_window = integer_digit_window(value, width, start, end);
+    let hi_value = Integer::from(value + err);
+    let hi_window = integer_digit_window(&hi_value, width, start, end);
+    if lo_window == hi_window {
+        Some(lo_window)
+    } else {
+        None
+    }
+}
+
 /// Case (b) of [`digits_fallback`] (`n0 > MAX_N0` forced the call at `n >= SMALL_N_THRESHOLD`):
 /// MPFR computes π directly to `n + count + guard` digits, which stays fast even at large `n`
-/// (unlike `pi_ref`'s Machin sum).
+/// (unlike `pi_ref`'s Machin sum) — but certified, the same way [`crate::pi_ref::digits`] is,
+/// rather than trusting MPFR's single round-to-nearest `to_integer()` blindly (which has no
+/// boundary check at all: a run of `9`s or `0`s right where the requested window falls could
+/// silently return the wrong digit).
+///
+/// The certification: round π itself both down and up at the working precision (`pi_lo <= π
+/// <= pi_hi`, both exact bounds — MPFR's directional rounding, not an approximation), multiply
+/// by the exactly-representable `10^total`, again rounding the product outward
+/// (`prod_lo <= π*10^total <= prod_hi`), then floor each bound explicitly (`Round::Down`,
+/// i.e. truncate-toward-zero, which is floor for these positive values) — floor is monotonic,
+/// so `[floor(prod_lo), floor(prod_hi)]` is a valid (if occasionally loose) bracket on
+/// `floor(π * 10^total)` itself. [`certify_window`] then either extracts a certified window
+/// from that bracket or reports it can't, in which case the guard is widened and the whole
+/// computation retried — exactly [`digits`]'s own retry loop, just with MPFR's rounding
+/// modes standing in for the fixed-point `x ± err` trick.
 #[cfg(feature = "gmp")]
 fn digits_fallback_large_n(n: u64, count: usize) -> String {
-    let guard: u64 = 20;
-    let total = n + count as u64 + guard;
-    let bits = crate::digits_to_bits(total as u32) + 8;
-    let pi = Float::with_val(bits, Constant::Pi);
-    let scale = Float::with_val(bits, Integer::from(10).pow(total as u32));
-    let scaled = Float::with_val(bits, &pi * &scale);
-    let int_part = scaled.to_integer().expect("pi * 10^total is finite");
-    let s = int_part.to_string(); // "3" followed by `total` decimal digits
-    let start = (n + 1) as usize;
-    s[start..start + count].to_string()
+    use rug::float::Round;
+
+    let mut guard: u64 = 20;
+    loop {
+        let total = n + count as u64 + guard;
+        let bits = crate::digits_to_bits(total as u32) + 8;
+
+        let (pi_lo, _) = Float::with_val_round(bits, Constant::Pi, Round::Down);
+        let (pi_hi, _) = Float::with_val_round(bits, Constant::Pi, Round::Up);
+
+        // 10^total is exactly representable at this precision (`digits_to_bits(total)` plus
+        // an 8-bit margin), so this conversion introduces no rounding error of its own.
+        let scale = Float::with_val(bits, Integer::from(10).pow(total as u32));
+
+        let (prod_lo, _) = Float::with_val_round(bits, &pi_lo * &scale, Round::Down);
+        let (prod_hi, _) = Float::with_val_round(bits, &pi_hi * &scale, Round::Up);
+
+        let (lo, _) = prod_lo
+            .to_integer_round(Round::Down)
+            .expect("pi_lo * 10^total is finite");
+        let (hi, _) = prod_hi
+            .to_integer_round(Round::Down)
+            .expect("pi_hi * 10^total is finite");
+
+        let width = total as usize + 1;
+        let start = (n + 1) as usize;
+        let end = start + count;
+        let err = Integer::from(&hi - &lo);
+
+        if let Some(digits) = certify_window(&lo, &err, width, start, end) {
+            return digits;
+        }
+        guard *= 2;
+    }
 }
 
 /// Case (b) of [`digits_fallback`] on the `pure` backend: no MPFR to fall back on, so this
@@ -1064,6 +1146,66 @@ mod tests {
                 let expected = sum_binomials_mod(big_n, k, m);
                 let got = sum_binomials_mod_sieved(big_n, k, m, &factors[k as usize]);
                 assert_eq!(got, expected, "M={big_m} N={big_n} k={k} m={m}");
+            }
+        }
+    }
+
+    // --- digits_fallback_large_n certification (gmp only: it's the only backend with this
+    // fallback — see its own docs for why the `pure` backend uses `pi_ref` there instead) ---
+
+    /// [`certify_window`] must refuse (return `None`) when the bracket `[value, value+err]`
+    /// straddles a carry inside the requested window, rather than silently picking one side.
+    /// Hand-built: `value = 12499`, `err = 2` (bracket `[12499, 12501]`), window = chars
+    /// `[1, 4)` out of 5 digits. `"12499"[1..4] = "249"`; `"12501"[1..4] = "250"` — different,
+    /// so the true value (somewhere in the bracket, e.g. `12500`, itself a carry) can't be
+    /// certified from these ends alone.
+    #[cfg(feature = "gmp")]
+    #[test]
+    fn certify_window_refuses_across_a_carry() {
+        let value = Integer::from(12499);
+        let err = Integer::from(2);
+        assert_eq!(certify_window(&value, &err, 5, 1, 4), None);
+    }
+
+    /// The same bracket, but with a window that doesn't touch the carry (`[0, 1)`, just the
+    /// leading digit): both ends agree (`'1'`), so it must certify.
+    #[cfg(feature = "gmp")]
+    #[test]
+    fn certify_window_accepts_when_bracket_agrees() {
+        let value = Integer::from(12499);
+        let err = Integer::from(2);
+        assert_eq!(
+            certify_window(&value, &err, 5, 0, 1),
+            Some("1".to_string())
+        );
+    }
+
+    /// A zero-width error bracket (a single exact value) always certifies, at any window.
+    #[cfg(feature = "gmp")]
+    #[test]
+    fn certify_window_accepts_exact_value() {
+        let value = Integer::from(31415);
+        let err = Integer::from(0);
+        assert_eq!(
+            certify_window(&value, &err, 5, 1, 4),
+            Some("141".to_string())
+        );
+    }
+
+    /// [`digits_fallback_large_n`] is a pure function of `(n, count)` — it has no precondition
+    /// tying it to large `n`, it's just not reached there in the normal `digits_fallback`
+    /// flow. Calling it directly at small `n` and comparing against [`crate::pi_ref::digits`]
+    /// (the exact reference used everywhere else in this crate) checks the MPFR certification
+    /// path agrees with the known-correct exact path, independent of when each is actually
+    /// invoked in production.
+    #[cfg(feature = "gmp")]
+    #[test]
+    fn digits_fallback_large_n_matches_pi_ref() {
+        for &n in &[0u64, 1, 100, 762, 1000, 2000, 5000] {
+            for &count in &[1usize, 5, 16] {
+                let got = digits_fallback_large_n(n, count);
+                let want = crate::pi_ref::digits(n, count);
+                assert_eq!(got, want, "n={n} count={count}");
             }
         }
     }

@@ -16,10 +16,28 @@ fn check_pos(pos: f64) -> Result<u64, JsError> {
     Ok(pos as u64)
 }
 
+/// Validates `count` against an already-checked 1-based `pos`: `count` must be at least 1, and
+/// the last position requested (`pos + count - 1`) must not run past the 200,000-digit browser
+/// demo range. Without this, a `count` that overruns the range would silently ask the
+/// underlying `pi_digits` functions for digits past what this demo's reference data covers.
+fn check_count(pos: u64, count: u32) -> Result<(), JsError> {
+    if count < 1 {
+        return Err(JsError::new("count must be at least 1"));
+    }
+    let end = pos + (count as u64) - 1;
+    if end as f64 > MAX_POS {
+        return Err(JsError::new(
+            "pos + count - 1 must not exceed 200000 (the browser demo range)",
+        ));
+    }
+    Ok(())
+}
+
 /// Digits at 1-based positions `pos..pos+count` via Gourdon's Theorem 1.
 #[wasm_bindgen]
 pub fn digits_thm1(pos: f64, count: u32) -> Result<String, JsError> {
     let p = check_pos(pos)?;
+    check_count(p, count)?;
     Ok(pi_digits::nthdigit::digits(p - 1, count as usize))
 }
 
@@ -27,6 +45,7 @@ pub fn digits_thm1(pos: f64, count: u32) -> Result<String, JsError> {
 #[wasm_bindgen]
 pub fn digits_thm2(pos: f64, count: u32) -> Result<String, JsError> {
     let p = check_pos(pos)?;
+    check_count(p, count)?;
     let n = p - 1;
     Ok(pi_digits::nthdigit2::digits(
         n,

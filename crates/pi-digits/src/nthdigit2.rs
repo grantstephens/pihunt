@@ -203,7 +203,7 @@ impl Params2 {
         assert!(
             big_n <= n + 2,
             "N={big_n} exceeds n+2={} for n={n}, n0={n0}, mem_bits={mem_bits}: n is too small \
-             for the requested precision; use the MPFR fallback instead",
+             for the requested precision; use the exact fallback instead",
             n + 2
         );
         Params2 {
@@ -1398,7 +1398,8 @@ pub fn frac_10n_pi_m_with_terms(n: u64, n0: u32, mem_bits: u64) -> (u128, u64) {
 
 /// `frac(10^n π)` to within `10^-n0`, as a 128-bit fixed-point fraction (value `= x / 2^128`).
 /// Same fixed-point convention as [`crate::nthdigit::frac_10n_pi`]. See [`digits`] for
-/// certified digit extraction with an MPFR fallback for small `n`.
+/// certified digit extraction with an exact fallback (`pi_ref`; MPFR under `gmp` for the
+/// rare large-n boundary case) for small `n`.
 pub fn frac_10n_pi_m(n: u64, n0: u32, mem_bits: u64) -> u128 {
     frac_10n_pi_m_with_terms(n, n0, mem_bits).0
 }

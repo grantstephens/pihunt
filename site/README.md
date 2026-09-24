@@ -50,6 +50,14 @@ upload the prebuilt `site/dist` directory directly, as above.
   `element.style.*` properties) on the spans it generates — there is no other inline styling on
   this page, and no inline `<script>` anywhere (`script-src` has no `'unsafe-inline'`).
   `'wasm-unsafe-eval'` is required for `WebAssembly.instantiate`/`instantiateStreaming`.
+- Caching: none of this site's filenames are content-hashed (`pi_digits_wasm_bg.wasm`, the
+  vendored KaTeX files, etc. keep the same name across a rebuild), so nothing gets a long
+  `immutable` cache — that would pair, say, a newly-deployed `pi_digits_wasm.js` glue file with
+  a stale cached `.wasm` after a redeploy. `/wasm/*.wasm` is served
+  `Cache-Control: public, max-age=0, must-revalidate` (always revalidated, so a redeploy is
+  picked up immediately); `/vendor/*` gets a moderate `public, max-age=86400` (a day) since it
+  changes far less often but isn't hash-named either. If hashed filenames are introduced later,
+  those (and only those) are the ones that should move to a long, `immutable` cache.
 - `site/scripts/check-site.mjs` re-validates the build output (anchors, local asset existence, no
   external `http(s)://` script/link/CSS references, `_headers` present and correct, the demo
   section's `<noscript>` fallback). It runs as the last step of `build.sh` and can also be run
