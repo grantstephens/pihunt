@@ -87,8 +87,8 @@ function corruptDigits(digits) {
   return digits.slice(0, -1) + replacement;
 }
 
-const RACE_DIGIT_COUNT = 20;
-const STREAM_BLOCK_SIZE = 1000;
+const RACE_DIGIT_COUNT = 10;
+const STREAM_BLOCK_SIZE = 10;
 const SOFT_WARNING_THRESHOLD = 100000;
 const SOFT_WARNING_MESSAGE = 'This may take a minute or more in the browser.';
 const AGREE_MESSAGE = '✓ lanes agree';
