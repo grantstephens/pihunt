@@ -910,7 +910,13 @@ fn integer_digit_window(x: &Integer, width: usize, start: usize, end: usize) -> 
 /// of `9`s rolling over to `0`s) somewhere in `[start, end)`, and this function refuses rather
 /// than guess which side of it the truth falls on.
 #[cfg(feature = "gmp")]
-fn certify_window(value: &Integer, err: &Integer, width: usize, start: usize, end: usize) -> Option<String> {
+fn certify_window(
+    value: &Integer,
+    err: &Integer,
+    width: usize,
+    start: usize,
+    end: usize,
+) -> Option<String> {
     debug_assert!(*err >= 0, "err must be non-negative");
     let lo_window = integer_digit_window(value, width, start, end);
     let hi_value = Integer::from(value + err);
@@ -1174,10 +1180,7 @@ mod tests {
     fn certify_window_accepts_when_bracket_agrees() {
         let value = Integer::from(12499);
         let err = Integer::from(2);
-        assert_eq!(
-            certify_window(&value, &err, 5, 0, 1),
-            Some("1".to_string())
-        );
+        assert_eq!(certify_window(&value, &err, 5, 0, 1), Some("1".to_string()));
     }
 
     /// A zero-width error bracket (a single exact value) always certifies, at any window.
