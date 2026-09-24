@@ -59,6 +59,25 @@ fn exact_division_and_small_helpers() {
 }
 
 #[test]
+#[should_panic(expected = "Big::sub underflow")]
+fn sub_underflow_panics_identically_in_both_backends() {
+    let _ = Big::from_u64(1).sub(&Big::from_u64(2));
+}
+
+#[test]
+fn to_u64_none_above_u64_max() {
+    assert_eq!(Big::from_u64(u64::MAX).to_u64(), Some(u64::MAX));
+    // 2^64 > u64::MAX by exactly 1, so this is the smallest value that must overflow.
+    assert_eq!(Big::pow_u64(2, 64).to_u64(), None);
+}
+
+#[test]
+fn binomial_edge_cases() {
+    assert_eq!(Big::binomial(10_000, 0), Big::one());
+    assert_eq!(Big::binomial(3, 5), Big::zero()); // k > n
+}
+
+#[test]
 fn matches_rug_on_random_inputs() {
     use rug::Integer;
     let to_rug = |b: &Big| b.to_decimal_string().parse::<Integer>().unwrap();

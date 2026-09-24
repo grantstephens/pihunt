@@ -28,7 +28,13 @@ mod imp {
         pub fn add(&self, o: &Big) -> Big {
             Big(Integer::from(&self.0 + &o.0))
         }
+        /// `self - other`. Precondition: `self >= other` (this type is unsigned; the caller
+        /// guarantees no underflow). Checked with a real `assert!` (not `debug_assert!`) so
+        /// this backend fails identically to `pure`'s (dashu `UBig` panics on unsigned
+        /// underflow regardless of build profile) rather than silently returning a negative
+        /// `rug::Integer` in release builds.
         pub fn sub(&self, o: &Big) -> Big {
+            assert!(self.0 >= o.0, "Big::sub underflow");
             Big(Integer::from(&self.0 - &o.0))
         }
         pub fn rem(&self, m: &Big) -> Big {
@@ -95,7 +101,13 @@ mod imp {
         pub fn add(&self, o: &Big) -> Big {
             Big(&self.0 + &o.0)
         }
+        /// `self - other`. Precondition: `self >= other` (this type is unsigned; the caller
+        /// guarantees no underflow). Checked with a real `assert!` (not `debug_assert!`) so
+        /// this backend fails identically to `gmp`'s in release builds too — dashu's `UBig`
+        /// would otherwise panic on unsigned underflow anyway, but with a less specific
+        /// message.
         pub fn sub(&self, o: &Big) -> Big {
+            assert!(self.0 >= o.0, "Big::sub underflow");
             Big(&self.0 - &o.0)
         }
         pub fn rem(&self, m: &Big) -> Big {
