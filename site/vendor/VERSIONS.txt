@@ -1,0 +1,27 @@
+Vendored third-party assets. Downloaded from official GitHub release tarballs/zips
+on 2026-09-24, extracted, and pruned to only the files this site uses. Archives were
+deleted after extraction (not kept in the repo).
+
+KaTeX v0.18.9
+  Source: https://github.com/KaTeX/KaTeX/releases/download/v0.18.9/katex.tar.gz
+  License: https://raw.githubusercontent.com/KaTeX/KaTeX/v0.18.9/LICENSE (MIT)
+  Kept: katex.min.css, katex.min.js, contrib/auto-render.min.js, fonts/*.woff2 (all 20,
+  woff/ttf fallbacks dropped since katex.min.css lists woff2 first and every browser this
+  site targets supports it), LICENSE.
+
+Inter v4.1
+  Source: https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
+  License: LICENSE.txt in the release zip (SIL Open Font License 1.1)
+  Kept: web/InterVariable.woff2 (variable weight, roman only -- no italic used on this
+  page), LICENSE.txt (renamed Inter-LICENSE.txt).
+
+JetBrains Mono v2.304
+  Source: https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip
+  License: OFL.txt in the release zip (SIL Open Font License 1.1)
+  Kept: fonts/webfonts/JetBrainsMono-Regular.woff2, fonts/webfonts/JetBrainsMono-Bold.woff2
+  (this release ships the variable weight font as .ttf only, no variable .woff2 -- static
+  Regular/Bold woff2 cover the page's digit/code text, which never asks for other weights),
+  OFL.txt (renamed JetBrainsMono-OFL.txt).
+
+Total vendored size: ~1.2 MB (fonts/vendor directory), within the ~1.5 MB site budget
+alongside the WASM module and pi-200k.txt reference data.
