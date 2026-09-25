@@ -108,6 +108,20 @@ const SOFT_WARNING_MESSAGE = 'This may take a minute or more in the browser.';
 const AGREE_MESSAGE = '✓ lanes agree';
 const MISMATCH_MESSAGE = '✗ Theorem 1 and Theorem 2 disagree — please report this';
 
+// Reports one custom event to the self-hosted analytics script (see index.html's <head> and
+// README.md's CSP notes), if it loaded. Never throws: an ad blocker, a slow network, or the
+// script simply not being there yet must not break the demo. Kept to a handful of named events
+// (never free-text like error messages some engine might surface) so this stays a simple usage
+// signal (which positions/methods people actually try, what the demo's real-world pass rate is)
+// rather than anything resembling a log of what a visitor typed.
+function track(name, data) {
+  try {
+    globalThis.umami?.track(name, data);
+  } catch {
+    /* analytics must never be able to break the demo */
+  }
+}
+
 // --- DOM wiring ---------------------------------------------------------------
 // Only runs in a browser; never touches `document` at import time so this
 // file stays importable by `node --test`.
@@ -174,7 +188,8 @@ function initDemo() {
   // started) register their lanes here so this can stop them too.
   let activeLanes = [];
 
-  function showUnsupported() {
+  function showUnsupported(reason) {
+    track('demo_unsupported', { reason });
     const el = document.getElementById('demo-unsupported');
     if (el) el.classList.remove('hidden');
     for (const btn of document.querySelectorAll('#race-panel button, #stream-panel button')) {
@@ -185,7 +200,7 @@ function initDemo() {
   }
 
   if (!browserSupportsDemo()) {
-    showUnsupported();
+    showUnsupported('init_check');
     return;
   }
 
@@ -260,6 +275,7 @@ function initDemo() {
       }
       setError(null);
       setWarning(parsed.pos > SOFT_WARNING_THRESHOLD);
+      track('race_start', { pos: parsed.pos });
 
       const runId = bumpRun();
       agreementEl.textContent = '';
@@ -283,7 +299,7 @@ function initDemo() {
         } catch {
           // Web Workers didn't actually work despite passing the init-time check (a
           // restrictive CSP, an embedder quirk, etc.) — stop here rather than limp along.
-          showUnsupported();
+          showUnsupported('race_worker_throw');
           return;
         }
         liveWorkers.push(worker);
@@ -312,6 +328,7 @@ function initDemo() {
         lane.msEl.textContent = '–';
         lane.memEl.textContent = '–';
         raceState.results[method] = { error: data.message };
+        track('race_error', { pos: raceState.pos, method });
       } else {
         lane.digitsEl.textContent = groupDigits(data.digits);
         lane.msEl.textContent = formatMs(data.ms);
@@ -330,13 +347,31 @@ function initDemo() {
         agreementEl.className = 'error';
         return;
       }
+      // #test-mismatch deliberately corrupts thm2's digits to exercise the disagreement UI (a
+      // manual QA hook, see corruptDigits' docs) -- that's not a real mismatch, so it's excluded
+      // from analytics rather than polluting real "lanes disagree" signal with test runs.
+      const isMismatchTestHook = typeof location !== 'undefined' && location.hash === '#test-mismatch';
       let compareDigits2 = thm2.digits;
-      if (typeof location !== 'undefined' && location.hash === '#test-mismatch') {
+      if (isMismatchTestHook) {
         compareDigits2 = corruptDigits(compareDigits2);
       }
       const agree = lanesAgree(thm1.digits, compareDigits2);
       agreementEl.textContent = agree ? AGREE_MESSAGE : MISMATCH_MESSAGE;
       agreementEl.className = agree ? 'match' : 'mismatch';
+      if (!isMismatchTestHook) {
+        track('race_result', {
+          pos: raceState.pos,
+          thm1_ms: Math.round(thm1.ms),
+          thm2_ms: Math.round(thm2.ms),
+          thm1_kib: Math.round(thm1.memBytes / 1024),
+          thm2_kib: Math.round(thm2.memBytes / 1024),
+          agree,
+        });
+        // A real lanes-disagree result would mean Theorem 1 and Theorem 2 computed different
+        // digits for the same position -- a correctness bug worth its own alarm-style event
+        // rather than being buried in race_result's `agree` field.
+        if (!agree) track('lanes_mismatch', { pos: raceState.pos });
+      }
     }
 
     function maybeUpdateReferenceCheck() {
@@ -351,6 +386,14 @@ function initDemo() {
       }[status];
       referenceEl.textContent = label;
       referenceEl.className = status === 'mismatch' ? 'mismatch' : status === 'match' ? 'match' : '';
+      // Guarded so a re-run of this function (it's called after every lane message, plus once
+      // the reference text finishes loading) can't double-report the same outcome. A real
+      // mismatch here means Theorem 1 disagrees with the known reference digits -- worth its own
+      // event for the same reason lanes_mismatch is: it should never happen.
+      if (status === 'mismatch' && !raceState.referenceMismatchTracked) {
+        raceState.referenceMismatchTracked = true;
+        track('reference_mismatch', { pos: raceState.pos });
+      }
     }
   }
 
@@ -385,6 +428,7 @@ function initDemo() {
         return;
       }
       setError(null);
+      track('stream_start', { pos: parsed.pos });
 
       const runId = bumpRun();
       outputEl.textContent = '';
@@ -394,7 +438,7 @@ function initDemo() {
       try {
         worker = new Worker('./worker.js', { type: 'module' });
       } catch {
-        showUnsupported();
+        showUnsupported('stream_worker_throw');
         return;
       }
       liveWorkers.push(worker);

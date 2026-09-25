@@ -49,7 +49,13 @@ upload the prebuilt `site/dist` directory directly, as above.
   solely because KaTeX renders math by setting inline `style="..."` attributes (and individual
   `element.style.*` properties) on the spans it generates — there is no other inline styling on
   this page, and no inline `<script>` anywhere (`script-src` has no `'unsafe-inline'`).
-  `'wasm-unsafe-eval'` is required for `WebAssembly.instantiate`/`instantiateStreaming`.
+  `'wasm-unsafe-eval'` is required for `WebAssembly.instantiate`/`instantiateStreaming`. The one
+  other exception: `script-src`/`connect-src` allow `https://a7s.hub13.xyz`, the self-hosted
+  (Umami) analytics script referenced from `<head>` — it's cookieless, collects page views plus a
+  handful of custom events from the race/stream demo (position, timings, memory, pass/fail; see
+  `demo.js`'s `track()` calls), and is the one deliberate exception
+  `site/scripts/check-site.mjs`'s `ALLOWED_EXTERNAL_SCRIPT_HOSTS` allowlists. Keep the CSP and
+  that allowlist in sync if the analytics host ever changes.
 - Caching: none of this site's filenames are content-hashed (`pi_digits_wasm_bg.wasm`, the
   vendored KaTeX files, etc. keep the same name across a rebuild), so nothing gets a long
   `immutable` cache — that would pair, say, a newly-deployed `pi_digits_wasm.js` glue file with

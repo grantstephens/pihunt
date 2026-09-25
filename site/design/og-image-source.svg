@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#ffffff"/>
+  <rect x="80" y="185" width="260" height="260" rx="52" fill="#2a5fc7"/>
+  <rect x="127" y="257" width="166" height="30" rx="15" fill="#ffffff"/>
+  <rect x="152" y="294" width="36" height="112" rx="13" fill="#ffffff"/>
+  <rect x="232" y="294" width="36" height="112" rx="13" fill="#ffffff"/>
+  <text x="392" y="270" font-family="sans-serif" font-weight="700" font-size="62" fill="#12151a">Decimal digits of &#960;</text>
+  <text x="392" y="345" font-family="sans-serif" font-weight="700" font-size="62" fill="#12151a">in O(&#8730;n) memory</text>
+  <text x="392" y="404" font-family="sans-serif" font-weight="400" font-size="30" fill="#454b54">Gourdon&#8217;s unpublished 2003 Theorem 2</text>
+  <text x="392" y="442" font-family="sans-serif" font-weight="400" font-size="30" fill="#454b54">reconstructed, verified, and benchmarked</text>
+  <text x="80" y="560" font-family="sans-serif" font-weight="700" font-size="30" fill="#767d87">pihunt</text>
+</svg>

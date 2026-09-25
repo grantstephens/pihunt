@@ -6,7 +6,9 @@
 //   1. every href="#x" has a matching id="x"
 //   2. every local script src / link href file exists under dist/
 //   3. no http(s):// references in <script src>, <link href>, or linked CSS url() (external
-//      <a href> links are fine and are not checked for existence)
+//      <a href> links are fine and are not checked for existence), except a script src whose
+//      host is in ALLOWED_EXTERNAL_SCRIPT_HOSTS below (a deliberate, narrow exception -- see it
+//      for what's allowed and why)
 //   4. dist/_headers exists and contains "application/wasm" and "Content-Security-Policy"
 //   5. a <noscript> element exists inside the demo section (aria-labelledby="demo-heading")
 //
@@ -19,6 +21,13 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(here, '..', 'dist'));
 const indexPath = path.join(distDir, 'index.html');
+
+// The one deliberate exception to "no external references": self-hosted, cookieless analytics
+// (see the footer note in index.html and README.md). Narrowly scoped to <script src> only --
+// this does not, and should not, extend to <link>/<img>/CSS url() external references, which
+// stay fully disallowed. Keep this in sync with the allowed origin in src/_headers' CSP
+// (script-src / connect-src) if it ever changes.
+const ALLOWED_EXTERNAL_SCRIPT_HOSTS = new Set(['a7s.hub13.xyz']);
 
 const failures = [];
 const fail = (msg) => failures.push(msg);
@@ -60,11 +69,20 @@ for (const m of html.matchAll(/\bhref="#([^"]+)"/g)) {
 }
 
 // --- Checks 2 & 3: local src/href existence + no http(s) in script/link, gather CSS to scan ---
+// `rel="canonical"` (and other non-fetching rels) point crawlers at a URL rather than making the
+// browser fetch anything, so they're exempt from both the existence and external-reference
+// checks below -- they're metadata, not a resource load, and a canonical URL is supposed to be
+// absolute and self-referential.
+const NON_FETCHING_LINK_RELS = new Set(['canonical', 'alternate', 'author', 'license', 'me']);
 const cssFilesToScan = [];
 
 for (const tagMatch of html.matchAll(/<(script|link|img)\b[^>]*>/gi)) {
   const tag = tagMatch[0];
   const tagName = tagMatch[1].toLowerCase();
+  if (tagName === 'link') {
+    const relMatch = tag.match(/\brel="([^"]*)"/i);
+    if (relMatch && NON_FETCHING_LINK_RELS.has(relMatch[1].toLowerCase())) continue;
+  }
   const attrName = tagName === 'link' ? 'href' : 'src';
   const attrMatch = tag.match(new RegExp(`\\b${attrName}="([^"]*)"`, 'i'));
   if (!attrMatch) continue;
@@ -72,7 +90,11 @@ for (const tagMatch of html.matchAll(/<(script|link|img)\b[^>]*>/gi)) {
 
   if (!isLocalRef(value)) {
     if (/^https?:\/\//i.test(value)) {
-      fail(`<${tagName} ${attrName}="${value}"> is an external http(s) reference (must be local)`);
+      const isAllowedScript =
+        tagName === 'script' && ALLOWED_EXTERNAL_SCRIPT_HOSTS.has(new URL(value).host);
+      if (!isAllowedScript) {
+        fail(`<${tagName} ${attrName}="${value}"> is an external http(s) reference (must be local)`);
+      }
     }
     continue;
   }

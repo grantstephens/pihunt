@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://pihunt.hub13.xyz/sitemap.xml
