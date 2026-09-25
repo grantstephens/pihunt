@@ -15,10 +15,13 @@
 <header class="site-header">
   <div class="wrap wrap-wide site-header-row">
     <span class="wordmark">pihunt</span>
-    <button type="button" id="theme-toggle" class="theme-toggle" aria-pressed="false">
-      <span class="theme-toggle-icon" aria-hidden="true"></span>
-      <span class="theme-toggle-label">Dark mode</span>
-    </button>
+    <div class="site-header-actions">
+      <a class="header-link" href="https://github.com/grantstephens/pihunt">GitHub</a>
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-pressed="false">
+        <span class="theme-toggle-icon" aria-hidden="true"></span>
+        <span class="theme-toggle-label">Dark mode</span>
+      </button>
+    </div>
   </div>
 </header>
 
@@ -553,10 +556,13 @@
 
 <section id="reproduce">
   <h2>Reproduce it</h2>
-  <p>This all lives in the pihunt source tree, in <code>crates/pi-digits/src/nthdigit.rs</code>
+  <p>This all lives in the pihunt source tree (<a href="https://github.com/grantstephens/pihunt">github.com/grantstephens/pihunt</a>),
+    in <code>crates/pi-digits/src/nthdigit.rs</code>
     (Theorem 1) and <code>crates/pi-digits/src/nthdigit2.rs</code> (Theorem 2). Theorem 2 is the CLI's
     default method.</p>
-  <pre><code>cargo build --release
+  <pre><code>git clone https://github.com/grantstephens/pihunt
+cd pihunt
+cargo build --release
 
 # Theorem 2 (default)
 pihunt digit 1000000
@@ -610,7 +616,7 @@ cargo test --release -j 4</code></pre>
 <footer class="site-footer">
   <div class="wrap wrap-wide">
     <p>Static site, no analytics, no third-party requests. Built with vendored KaTeX, Inter and
-      JetBrains Mono.</p>
+      JetBrains Mono. Source on <a href="https://github.com/grantstephens/pihunt">GitHub</a>.</p>
   </div>
 </footer>
 

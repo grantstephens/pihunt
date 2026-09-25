@@ -213,6 +213,17 @@ a:hover { text-decoration-thickness: 2px; }
   color: var(--ink);
 }
 
+.site-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.header-link {
+  font-size: 0.85rem;
+  color: var(--ink-secondary);
+}
+.header-link:hover { color: var(--accent); }
+
 .theme-toggle {
   display: inline-flex;
   align-items: center;
