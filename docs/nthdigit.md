@@ -325,6 +325,28 @@ close to the reconstruction doc's own Python-prototype-vs-C-Theorem-1 ratios in 
 than a Python one relative to Theorem 1's now-also-native inner loop — exactly the "should be
 much faster per leaf" the doc's §7 caveats anticipated.
 
+**2026-09-25 update — `cofactor` bounded too.** The 2026-09-23 fix above left `cofactor` (a `Vec`
+that held every leftover-large-prime Lucas need for the whole run) as the dominant *named* term at
+large `n` — still genuinely `O(N)`, not `O(mem_bits)` (see `docs/nthdigit-theorem2.md` §7's
+"Update" and "Update 2"). `CofactorResolver` (`src/nthdigit2.rs`) now resolves these needs in
+`O(mem_bits)`-sized batches as they're found, instead of collecting the whole run's worth before
+resolving any — see that module's "Memory" docs for the mechanism. Measured peak RSS, same machine
+as above, `--release`, before/after run back-to-back so machine load isn't a confound:
+
+| n | mem_bits | Thm2 time (before) | Thm2 peak RSS (before) | Thm2 time (after) | Thm2 peak RSS (after) |
+|---:|---:|---:|---:|---:|---:|
+| 10⁶ | 13 288 | 4.58 s | 13.9 MiB | 4.74 s | 10.8 MiB |
+| 3·10⁶ | 23 015 | 19.5 s | 23.4 MiB | 20.0 s | 15.2 MiB |
+| 10⁷ | 42 020 | 119.0 s | 68.9 MiB | 118.3-120.5 s (2 runs) | 19.8-24.0 MiB (2 runs) |
+
+(These "before" figures were re-measured this session rather than reused from the 2026-09-23 row
+above, specifically to control for machine load: an early comparison against the *old*,
+differently-timed 111.0 s/69.2 MiB figures looked like a ~9% regression, which a same-session,
+same-build baseline showed was just this machine currently running ~7% slower across the board,
+not a real cost of the fix.) Time is unchanged within run-to-run noise at every size; memory drops
+25-70%, growing with `n` since `cofactor` was a larger fraction of the total the bigger `n` got.
+10⁴/10⁵ aren't shown: `cofactor` was never a measurable fraction of their (already small) peak RSS.
+
 ### Other `mem_bits` values (doc §6.2's fixed-n, varying-m experiment)
 
 | n | mem_bits | Thm2 time | Thm2 peak RSS |

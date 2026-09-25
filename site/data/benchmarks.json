@@ -1,12 +1,12 @@
 {
   "machine": "AMD Ryzen 7 5700G, 6 cores",
-  "date": "2026-09-23",
+  "date": "2026-09-25",
   "rows": [
     { "pos": 10000,    "thm1_s": 0.034, "thm1_mib": 5.2, "thm2_s": 0.016, "thm2_mib": 5.7,  "pidec_s": 3.13 },
     { "pos": 100000,   "thm1_s": 1.51,  "thm1_mib": 5.1, "thm2_s": 0.217, "thm2_mib": 7.3,  "pidec_s": 185.1 },
-    { "pos": 1000000,  "thm1_s": 113.4, "thm1_mib": 5.0, "thm2_s": 4.17,  "thm2_mib": 14.1, "pidec_s": 15869 },
-    { "pos": 3000000,  "thm1_s": null,  "thm1_mib": null, "thm2_s": 19.3, "thm2_mib": 22.7, "pidec_s": null },
-    { "pos": 10000000, "thm1_s": 7107,  "thm1_mib": 4.2, "thm2_s": 111.0, "thm2_mib": 69.2, "pidec_s": null }
+    { "pos": 1000000,  "thm1_s": 113.4, "thm1_mib": 5.0, "thm2_s": 4.74,  "thm2_mib": 10.8, "pidec_s": 15869 },
+    { "pos": 3000000,  "thm1_s": null,  "thm1_mib": null, "thm2_s": 20.0, "thm2_mib": 15.2, "pidec_s": null },
+    { "pos": 10000000, "thm1_s": 7107,  "thm1_mib": 4.2, "thm2_s": 119.4, "thm2_mib": 22.0, "pidec_s": null }
   ],
-  "memory_history_1e7_mib": { "first_port": 812.1, "streamed": 447, "memo_fix": 69.2 }
+  "memory_history_1e7_mib": { "first_port": 812.1, "streamed": 447, "memo_fix": 69.2, "cofactor_batched": 22.0 }
 }

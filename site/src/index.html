@@ -401,7 +401,7 @@
     the guard to resolve, the guard doubles and the whole computation retries.</p>
 
   <h3>The memory story at n = 10&#8311;</h3>
-  <p>Three implementation stages, same position, same machine, peak resident memory:</p>
+  <p>Four implementation stages, same position, same machine, peak resident memory:</p>
   <ul class="stat-list">
     <li><span class="badge badge-measured">measured</span> <strong>812.1&nbsp;MiB</strong> &mdash;
       the first port: a full O(N) factorisation table and a full sorted item list, held before
@@ -417,16 +417,19 @@
       40 of 58&nbsp;MiB at n=10&#8310; on its own), and small-prime need-lists that stored every
       matching (k,t) pair instead of the compact arithmetic-progression range each one actually forms.
       Both fixed.</li>
+    <li><span class="badge badge-measured">measured</span> <strong>~20&ndash;24&nbsp;MiB</strong>
+      (two runs) &mdash; after bounding the one piece that stage still left genuinely O(N): each
+      target's leftover-prime <em>cofactor</em> need (below). Resolved in fixed-size batches as
+      they're found instead of collected for the whole run before any of them are resolved.</li>
   </ul>
-  <p>What's left, and still genuinely O(N) rather than O(m): each target's <em>cofactor</em> &mdash;
-    the single leftover prime factor of m<sub>k</sub> above &radic;(max&nbsp;m<sub>k</sub>), when there
-    is one. Unlike a small sieve prime, a cofactor is essentially unique to its own k (or its mirror),
-    not shared by a residue-class arithmetic progression, so it resists the same compaction the small
-    primes got. It is now the dominant <em>named</em> remaining term but is small in absolute terms
-    &mdash; tens of MiB, not hundreds, through n&nbsp;=&nbsp;10&#8311;. Eliminating it fully would need
-    an external (disk-backed) sort of cofactor needs by target, or a classification that doesn't
-    require computing a cofactor's value before knowing whether it counts as small; neither is
-    implemented.</p>
+  <p>Each target's <em>cofactor</em> &mdash; the single leftover prime factor of m<sub>k</sub> above
+    &radic;(max&nbsp;m<sub>k</sub>), when there is one &mdash; needs the same Lucas treatment as a
+    small sieve prime, but is essentially unique to its own k (or its mirror), not shared by a
+    residue-class arithmetic progression, so it resists the same per-prime compaction the small
+    primes got. Grouping doesn't shrink it; bounding how many are ever alive <em>at once</em> does:
+    they're now resolved in batches sized off the memory budget itself, each batch folded into a
+    running total and discarded, rather than collected into one structure that grows with n for the
+    whole run. Wall-clock time was unchanged within run-to-run noise at every n tested.</p>
 </section>
 
 <section id="benchmarks">
@@ -462,16 +465,17 @@
     <tbody>
       <tr><td>10,000</td><td>34&nbsp;ms</td><td>5.2&nbsp;MiB</td><td>16&nbsp;ms</td><td>5.7&nbsp;MiB</td><td>3.13&nbsp;s</td></tr>
       <tr><td>100,000</td><td>1.51&nbsp;s</td><td>5.1&nbsp;MiB</td><td>217&nbsp;ms</td><td>7.3&nbsp;MiB</td><td>185.1&nbsp;s</td></tr>
-      <tr><td>1,000,000</td><td>113.4&nbsp;s</td><td>5.0&nbsp;MiB</td><td>4.17&nbsp;s</td><td>14.1&nbsp;MiB</td><td>15,869&nbsp;s (4h&nbsp;24m)</td></tr>
-      <tr><td>3,000,000</td><td>&mdash;</td><td>&mdash;</td><td>19.3&nbsp;s</td><td>22.7&nbsp;MiB</td><td>&mdash;</td></tr>
-      <tr><td>10,000,000</td><td>7,107&nbsp;s (1h&nbsp;58m)</td><td>4.2&nbsp;MiB</td><td>111.0&nbsp;s (1m&nbsp;51s)</td><td>69.2&nbsp;MiB</td><td>&mdash;</td></tr>
+      <tr><td>1,000,000</td><td>113.4&nbsp;s</td><td>5.0&nbsp;MiB</td><td>4.74&nbsp;s</td><td>10.8&nbsp;MiB</td><td>15,869&nbsp;s (4h&nbsp;24m)</td></tr>
+      <tr><td>3,000,000</td><td>&mdash;</td><td>&mdash;</td><td>20.0&nbsp;s</td><td>15.2&nbsp;MiB</td><td>&mdash;</td></tr>
+      <tr><td>10,000,000</td><td>7,107&nbsp;s (1h&nbsp;58m)</td><td>4.2&nbsp;MiB</td><td>119.4&nbsp;s (1m&nbsp;59s)</td><td>22.0&nbsp;MiB</td><td>&mdash;</td></tr>
     </tbody>
   </table>
   </div>
-  <p class="fine-print">Theorem 2's memory grows with position (it's the whole point &mdash; it's
-    spending memory to buy speed); Theorem 1's stays flat at a few MiB, genuinely O(log&sup2;&nbsp;n).
-    Theorem 2 is faster at every position measured from 10,000 up, by a growing margin: about 2&times;
-    at 10,000, roughly 64&times; at 10,000,000.</p>
+  <p class="fine-print">Theorem 2's memory grows with position (it's spending memory to buy speed
+    &mdash; though as of the cofactor-batching fix above, a fair amount of what used to grow here
+    was implementation overhead, not the deliberate trade); Theorem 1's stays flat at a few MiB,
+    genuinely O(log&sup2;&nbsp;n). Theorem 2 is faster at every position measured from 10,000 up,
+    by a growing margin: about 2&times; at 10,000, roughly 60&times; at 10,000,000.</p>
 </section>
 
 <section id="verification">
@@ -538,10 +542,13 @@
 <section id="limits">
   <h2>Limits and caveats</h2>
   <ul>
-    <li><span class="badge badge-measured">measured</span> Memory is not the strict O(m) the bound
-      promises in the asymptotic sense: the cofactor term above is still O(N), just small in practice
-      (tens of MiB, not hundreds, through n&nbsp;=&nbsp;10&#8311;). It hasn't been tested at, say,
-      n&nbsp;=&nbsp;10&#8313;.</li>
+    <li><span class="badge badge-measured">measured</span> Memory is close to but not the strict
+      O(m) the bound promises in the asymptotic sense: the ART's own product tree is kept in full
+      per chunk (O(m&nbsp;log&nbsp;L) rather than O(m) &mdash; recomputing nodes instead of keeping
+      them would close that gap but isn't implemented), and there's some constant per-thread/rayon
+      overhead this doesn't itemise. The cofactor term that used to be the dominant O(N) piece is
+      now itself O(m), resolved in memory-budget-sized batches. None of this has been tested at,
+      say, n&nbsp;=&nbsp;10&#8313;.</li>
     <li>This is a <strong>reconstruction and a verified implementation</strong>, not a formal proof that
       it matches Gourdon's own method, and not a claim that his proof (which we've never seen) looked
       like this one.</li>

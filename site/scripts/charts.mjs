@@ -191,6 +191,11 @@ function buildCharts(bench) {
     values: { thm1: r.thm1_mib, thm2: r.thm2_mib },
   }));
 
+  // Derived from `bench.rows` rather than hardcoded, so these aria-label sentences can't go
+  // stale the way they did when benchmarks.json was updated but these string literals weren't.
+  const firstRow = bench.rows[0];
+  const lastRow = bench.rows[bench.rows.length - 1];
+
   const timeChart = renderChart({
     points,
     seriesKeys: ['pidec', 'thm1', 'thm2'],
@@ -198,10 +203,12 @@ function buildCharts(bench) {
     formatY: formatSeconds,
     dashed: new Set(['pidec']),
     ariaLabel:
-      'Log-log chart of wall-clock time versus digit position, for Theorem 1, Theorem 2, and Gourdon’s 2003 pidec (Pentium III, 2003). Theorem 2 is fastest at every measured position from 10,000 upward, and the gap widens with position: at 10,000,000, Theorem 1 takes ' +
-      formatSeconds(7107) +
+      'Log-log chart of wall-clock time versus digit position, for Theorem 1, Theorem 2, and Gourdon’s 2003 pidec (Pentium III, 2003). Theorem 2 is fastest at every measured position from 10,000 upward, and the gap widens with position: at ' +
+      formatPos(lastRow.pos) +
+      ', Theorem 1 takes ' +
+      formatSeconds(lastRow.thm1_s) +
       ' and Theorem 2 takes ' +
-      formatSeconds(111.0) +
+      formatSeconds(lastRow.thm2_s) +
       '. pidec has no data point past 1,000,000.',
   });
 
@@ -213,10 +220,14 @@ function buildCharts(bench) {
     dashed: new Set(),
     ariaLabel:
       'Log-log chart of peak memory versus digit position, for Theorem 1 and Theorem 2. Theorem 1 stays flat at roughly 5 MiB across all positions; Theorem 2 grows with position, from ' +
-      formatMiB(5.7) +
-      ' at 10,000 to ' +
-      formatMiB(69.2) +
-      ' at 10,000,000, trading bounded memory for a large speed advantage.',
+      formatMiB(firstRow.thm2_mib) +
+      ' at ' +
+      formatPos(firstRow.pos) +
+      ' to ' +
+      formatMiB(lastRow.thm2_mib) +
+      ' at ' +
+      formatPos(lastRow.pos) +
+      ', trading bounded memory for a large speed advantage.',
   });
 
   return { timeChart, memChart };

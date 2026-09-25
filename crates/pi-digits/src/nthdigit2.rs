@@ -114,28 +114,43 @@
 //! dominated by the one piece below, `cofactor`, plus a roughly-comparable amount of transient
 //! `rug::Integer`/rayon/glibc-arena overhead this section doesn't itemise further.
 //!
-//! **What's still not `O(mem_bits)` (doc §7's one remaining honest caveat):** a prime `p` can
-//! divide `m_k` *without* being `<= sqrt(max m_k)` — it's `m_k`'s single larger leftover
-//! cofactor (there's at most one per `k`, `m_k`'s factorisation leaves at most one prime factor
-//! above its square root). When that cofactor is itself `<= t_k`, it still needs Lucas
-//! treatment, but unlike a small sieve prime it's essentially unique to one or two `k` (not
-//! shared by a residue-class arithmetic progression the way a `p <= sqrt(max m_k)` prime is, so
-//! most of its `SideRanges` entries — yes, it's routed through the same machinery as
-//! `lucas_small` now, see [`c_part`] — have exactly one member and don't compact). It can't be
-//! resolved by the same bounded per-prime iteration. [`stream_needs_and_chunks`] collects the
-//! raw needs into `cofactor`, a `Vec` whose size is **not** bounded independent of `N` — measured
-//! at 45 K entries at `n=1e6` (~1.5 MiB) and 133 K entries at `n=3e6` (~6 MiB), 24 bytes each.
-//! It's still `O(N)` words. Eliminating it for real would need either an external (disk-backed)
-//! sort of the cofactor needs by target, or a smarter per-prime classification that doesn't
-//! require discovering the cofactor's value before knowing whether it's "small" — both are
-//! future work, not implemented here. In practice, at the `n` this implementation is run at, it
-//! no longer dominates: see the measured table in `docs/nthdigit.md`.
+//! **Why this was hard to bound (historical; fixed below):** a prime `p` can divide `m_k`
+//! *without* being `<= sqrt(max m_k)` — it's `m_k`'s single larger leftover cofactor (there's at
+//! most one per `k`, `m_k`'s factorisation leaves at most one prime factor above its square
+//! root). When that cofactor is itself `<= t_k`, it still needs Lucas treatment, but unlike a
+//! small sieve prime it's essentially unique to one or two `k` (not shared by a residue-class
+//! arithmetic progression the way a `p <= sqrt(max m_k)` prime is, so most of its `SideRanges`
+//! entries — yes, it's routed through the same machinery as `lucas_small` — have exactly one
+//! member and don't compact). Grouping by prime the way `lucas_small` does therefore buys no
+//! compaction here: the fix has to bound how many cofactor needs are ever alive *at once*, not
+//! how compactly each one is stored.
+//!
+//! **Update (2026-09-25): fixed, via bounded batching, not per-prime compaction.**
+//! [`CofactorResolver`] buffers raw `(p, k, t)` triples and flushes automatically once the
+//! buffer reaches [`CofactorResolver::batch_cap`] entries (`O(mem_bits)`, the same order as one
+//! Main-item chunk) — a flush regroups just that batch into a `SideRanges` map and runs it
+//! through the exact same [`lucas_art_items`]/[`resolve_lucas_items`]/[`lucas_consumers`]
+//! pipeline `lucas_small` already used, folding the result into a running total instead of
+//! keeping the batch around. `stream_needs_and_chunks` never sees a `cofactor` collection at
+//! all now — `on_cofactor` is a plain callback it calls once per find. Measured peak RSS (this
+//! machine, `--release`, back-to-back before/after so machine load isn't a confound): `n=1e6`
+//! 13.9 MiB -> 10.8 MiB, `n=3e6` 23.4 MiB -> 15.2 MiB, `n=1e7` 68.9 MiB -> 20-24 MiB (two runs;
+//! `cofactor` was the dominant *named* term at this `n`, per the "What was actually dominant"
+//! section above, so this is most of what's left of it). Wall-clock time was unchanged within
+//! run-to-run noise at every size tested (a naive first attempt using a much smaller batch cap
+//! looked ~9% slower at `n=1e7` until a same-machine, same-build baseline comparison showed that
+//! gap was pre-existing machine variance, not the smaller cap — see [`CofactorResolver::batch_cap`]'s
+//! docs for why the cap ended up sized the way it did anyway). Tests: `stream_needs_and_chunks`'s
+//! own callers stay free to collect the full raw list instead (see
+//! `nthdigit2::tests::streamed_construction`, which needs it for a from-scratch reference
+//! comparison), and `nthdigit2::tests::cofactor_flushes_keep_peak_batch_bounded` asserts the
+//! *production* path's peak buffered batch never exceeds `batch_cap`, on an `n` proven (in the
+//! same test) to produce several batches' worth of raw entries.
 //!
 //! **Overall bound achieved:** peak memory is `O(mem_bits log(mem_bits) * threads + pi(sqrt(max
-//! m_k)) + chunks + cofactor_count)` where `chunks = O(N log n / mem_bits)` (tiny: a few thousand
-//! `(u64,u64)` pairs even at `n = 1e7`) and `cofactor_count` is the one term above that scales
-//! with `N` — now, empirically, the dominant *named* term, but itself only tens of MiB through
-//! `n = 1e7` (measured; see `docs/nthdigit.md`).
+//! m_k)) + chunks)` where `chunks = O(N log n / mem_bits)` (tiny: a few thousand `(u64,u64)` pairs
+//! even at `n = 1e7`) — genuinely independent of `N` now that cofactor resolution is batched
+//! rather than collected whole.
 
 use crate::bignum::Big;
 use crate::nthdigit::{
@@ -391,8 +406,11 @@ impl SideRanges {
 /// `e == 1`), small-prime p-adic needs (`p <= t`, `e >= 2`), and the one-off "cofactor Lucas"
 /// case (leftover cofactor `<= t`) that doc §7 calls out as the part that doesn't fit neatly
 /// into a per-prime arithmetic progression (the cofactor is essentially unique to this `k`, not
-/// shared by a residue class of other `k`s the way a small sieve prime is). Pushed into the
-/// caller's collectors rather than returned, so a hot per-`k` loop doesn't allocate.
+/// shared by a residue class of other `k`s the way a small sieve prime is). Small-prime needs are
+/// pushed into the caller's `HashMap`s directly; cofactor needs go through a caller-supplied sink
+/// instead of a collector this function owns, so a hot per-`k` loop doesn't allocate here and the
+/// caller controls how much cofactor state stays alive at once (doc §7 fix: see
+/// [`CofactorResolver`]).
 fn classify_extras(
     t: u64,
     k: u64,
@@ -400,7 +418,7 @@ fn classify_extras(
     fac: &[(u64, u32)],
     lucas_small: &mut HashMap<u64, SideRanges>,
     padic_small: &mut HashMap<u64, SideRanges>,
-    cofactor: &mut Vec<(u64, u64, u64)>, // (p, k, t)
+    on_cofactor: &mut impl FnMut(u64, u64, u64), // (p, k, t)
 ) {
     let is_high = k != t;
     for &(p, e) in fac {
@@ -414,7 +432,7 @@ fn classify_extras(
         }
     }
     if rem > 1 && rem <= t {
-        cofactor.push((rem, k, t));
+        on_cofactor(rem, k, t);
     }
 }
 
@@ -435,9 +453,6 @@ struct StreamNeeds {
     /// consumption time — see [`padic_consumers`] — rather than stored, since within one `p` it
     /// varies member-to-member and storing it was exactly the `Vec<(k,t,e)>` this replaces).
     padic_small: HashMap<u64, SideRanges>,
-    /// `(p, k, t)` triples for the cofactor-Lucas case (doc §7 caveat: `O(fraction * N)`, not
-    /// bounded independent of `N`).
-    cofactor: Vec<(u64, u64, u64)>,
 }
 
 /// Batch size for [`stream_needs_and_chunks`]'s factoring windows: large enough to amortise
@@ -459,11 +474,18 @@ fn stream_batch_size(half: u64) -> u64 {
 /// Requires `big_n` even (always true for a real run — [`Params2::new`] guarantees it — so the
 /// `t in [0, N/2)` pairing `(k = t, k = N-1-t)` covers every `k` exactly once with no leftover
 /// middle element).
+///
+/// `on_cofactor` receives every `(p, k, t)` cofactor-Lucas need as it's found, in `t` order but
+/// with no other structure imposed — it's up to the caller how much of that state to keep alive
+/// at once. Production (`c_part`) passes a [`CofactorResolver`], which resolves and discards in
+/// bounded batches (doc §7 fix); tests that want the full raw list (to compare against a naive
+/// reference construction) pass a plain `Vec`-collecting closure instead.
 fn stream_needs_and_chunks(
     base: u64,
     big_n: u64,
     small_primes: &[u64],
     mem_bits: u64,
+    mut on_cofactor: impl FnMut(u64, u64, u64),
 ) -> StreamNeeds {
     debug_assert!(big_n.is_multiple_of(2), "big_n must be even, got {big_n}");
     let half = big_n / 2;
@@ -471,7 +493,6 @@ fn stream_needs_and_chunks(
     let mut chunk_bounds = Vec::new();
     let mut lucas_small: HashMap<u64, SideRanges> = HashMap::new();
     let mut padic_small: HashMap<u64, SideRanges> = HashMap::new();
-    let mut cofactor = Vec::new();
     let mut bits_acc = 0u64;
     let mut chunk_start = 0u64;
     let mut t0 = 0u64;
@@ -493,7 +514,7 @@ fn stream_needs_and_chunks(
                 &fac_lo[i_lo],
                 &mut lucas_small,
                 &mut padic_small,
-                &mut cofactor,
+                &mut on_cofactor,
             );
             if let Some(q) = main_modulus(t, rem_lo[i_lo], &fac_lo[i_lo]) {
                 bits_acc += 64 - q.leading_zeros() as u64;
@@ -505,7 +526,7 @@ fn stream_needs_and_chunks(
                 &fac_hi[i_hi],
                 &mut lucas_small,
                 &mut padic_small,
-                &mut cofactor,
+                &mut on_cofactor,
             );
             if let Some(q) = main_modulus(t, rem_hi[i_hi], &fac_hi[i_hi]) {
                 bits_acc += 64 - q.leading_zeros() as u64;
@@ -526,7 +547,6 @@ fn stream_needs_and_chunks(
         chunk_bounds,
         lucas_small,
         padic_small,
-        cofactor,
     }
 }
 
@@ -1287,13 +1307,102 @@ fn padic_consumers(
     ))
 }
 
+/// Resolves cofactor-Lucas needs (doc §7: the leftover-prime-factor case, `p <= t`) in bounded
+/// batches instead of collecting all of them for the whole run before resolving any. A cofactor
+/// prime is essentially unique to one or two `k` (unlike a small sieve prime, doc §7), so grouping
+/// them by prime the way [`SideRanges`] groups small primes buys no compaction — the fix has to
+/// bound how many are ever alive *at once*, not how compactly each one is stored.
+///
+/// `push` buffers raw `(p, k, t)` triples and flushes automatically once the buffer reaches
+/// [`Self::batch_cap`] entries (same order as one Main-item chunk, doc §5.1), reusing the exact
+/// [`lucas_art_items`]/[`resolve_lucas_items`]/[`lucas_consumers`] pipeline the small-prime case
+/// already goes through — a flush is just that pipeline run on a bounded slice instead of the
+/// whole run. `peak_len` (used by the memory test) records the largest the buffer ever got.
+struct CofactorResolver {
+    n: u64,
+    big_n: u64,
+    base: u64,
+    mem_bits: u64,
+    lg_n: u32,
+    buf: Vec<(u64, u64, u64)>,
+    acc: u128,
+    terms: u64,
+    peak_len: usize,
+}
+
+impl CofactorResolver {
+    /// Batch size: independent of `N`, so peak buffered bytes stay `O(mem_bits)` (doc §7's fix)
+    /// instead of `O(N)` — at `mem_bits` this is at most a few hundred KB even at `n = 1e7`,
+    /// nowhere near the tens-of-MiB `cofactor` used to cost, so there's no pressure to shave this
+    /// further. Using `mem_bits` itself (not some fraction of it) keeps the flush count in the
+    /// same ballpark as the number of Main-item chunks, rather than an arbitrary multiple of it.
+    /// Floored at 4096 so tiny `mem_bits` budgets (e.g. this module's own tests) still batch.
+    fn batch_cap(mem_bits: u64) -> usize {
+        (mem_bits as usize).max(4096)
+    }
+
+    fn new(n: u64, big_n: u64, base: u64, mem_bits: u64, lg_n: u32) -> Self {
+        Self {
+            n,
+            big_n,
+            base,
+            mem_bits,
+            lg_n,
+            buf: Vec::new(),
+            acc: 0,
+            terms: 0,
+            peak_len: 0,
+        }
+    }
+
+    fn push(&mut self, p: u64, k: u64, t: u64) {
+        self.buf.push((p, k, t));
+        self.peak_len = self.peak_len.max(self.buf.len());
+        if self.buf.len() >= Self::batch_cap(self.mem_bits) {
+            self.flush();
+        }
+    }
+
+    /// Regroups the current batch into the same [`SideRanges`] shape [`lucas_small`] uses (doc
+    /// §7: "a `k` with `q | m_k` is an AP of step `q` too, since `q` is prime"), resolves it, and
+    /// folds the result into the running total.
+    fn flush(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let mut need: HashMap<u64, SideRanges> = HashMap::new();
+        for &(p, k, t) in &self.buf {
+            need.entry(p).or_default().extend(k != t, t);
+        }
+        let mut items = lucas_art_items(&need);
+        let lucas_val = resolve_lucas_items(
+            self.n,
+            self.big_n,
+            self.base,
+            &mut items,
+            self.mem_bits,
+            self.lg_n,
+        );
+        let (acc, terms) = lucas_consumers(self.n, self.big_n, self.base, &need, &lucas_val);
+        self.acc = self.acc.wrapping_add(acc);
+        self.terms += terms;
+        self.buf.clear();
+    }
+
+    fn finish(mut self) -> (u128, u64) {
+        self.flush();
+        (self.acc, self.terms)
+    }
+}
+
 /// The full C part (streaming, doc §4.4/§7): one sequential pass ([`stream_needs_and_chunks`])
-/// decides Main-item chunk boundaries and collects small-prime/cofactor Lucas and p-adic needs
-/// without ever holding a global factor table or item list; Main-item chunks are then
-/// regenerated and run through the ART in parallel ([`art_chunk_by_range`]); small-prime and
-/// cofactor Lucas items each get their own bounded ART sub-pass ([`resolve_lucas_items`]); then
-/// the usual Lucas/p-adic consumer passes. Returns `(C, term_count)`, `term_count` being the
-/// exact number of rounded fixed-point terms folded in (for [`crate::nthdigit::error_units`]).
+/// decides Main-item chunk boundaries, collects small-prime Lucas/p-adic needs, and resolves
+/// cofactor-Lucas needs in bounded batches as they're found ([`CofactorResolver`]) — none of it
+/// ever holds a global factor table or item list. Main-item chunks are then regenerated and run
+/// through the ART in parallel ([`art_chunk_by_range`]); small-prime Lucas items get their own
+/// bounded ART sub-pass ([`resolve_lucas_items`]); then the usual Lucas/p-adic consumer passes.
+/// Returns `(C, term_count)`, `term_count` being the exact number of rounded fixed-point terms
+/// folded in (for [`crate::nthdigit::error_units`]).
 fn c_part(n: u64, p: Params2) -> (u128, u64) {
     let (big_m, big_n) = (p.big_m, p.big_n);
     let base = 2 * big_m * big_n + 1;
@@ -1302,9 +1411,15 @@ fn c_part(n: u64, p: Params2) -> (u128, u64) {
     let small_primes = primes_upto((m_max as f64).sqrt() as u64 + 2);
     crate::mem_profile::checkpoint("c_part: start");
 
-    let needs = stream_needs_and_chunks(base, big_n, &small_primes, p.mem_bits);
+    let mut cofactor_resolver = CofactorResolver::new(n, big_n, base, p.mem_bits, lg_n);
+    let needs = stream_needs_and_chunks(base, big_n, &small_primes, p.mem_bits, |pf, k, t| {
+        cofactor_resolver.push(pf, k, t)
+    });
     #[cfg(feature = "mem-profile")]
-    log_needs_sizes(&needs, &small_primes);
+    let cofactor_peak_len = cofactor_resolver.peak_len;
+    let (cofactor_acc, cofactor_terms) = cofactor_resolver.finish();
+    #[cfg(feature = "mem-profile")]
+    log_needs_sizes(&needs, &small_primes, cofactor_peak_len);
     crate::mem_profile::checkpoint("c_part: after stream_needs_and_chunks");
 
     // Main items: regenerate + run each chunk independently, in parallel.
@@ -1325,25 +1440,7 @@ fn c_part(n: u64, p: Params2) -> (u128, u64) {
         lucas_consumers(n, big_n, base, &needs.lucas_small, &small_lucas_val);
     crate::mem_profile::checkpoint("c_part: after small-prime Lucas");
     let (padic_acc, padic_terms) = padic_consumers(n, big_n, base, &needs.padic_small, m_max);
-    crate::mem_profile::checkpoint("c_part: after p-adic");
-
-    // Cofactor Lucas items (doc §7: the one piece whose count isn't bounded independent of N —
-    // regroup the raw (p, k, t) triples into the same SideRanges shape as lucas_small (doc §7's
-    // fix: k with q | m_k is an AP of step q here too, since q is prime — see SideRanges' docs),
-    // then reuse the exact same machinery. This doesn't shrink `cofactor` itself (still O(N) —
-    // most of these primes are each unique to one or two k, so the range rarely has more than
-    // one member), but it does mean there's only one Lucas-item/consumer implementation to get
-    // right, and it costs no more than the flat Vec did.
-    let mut cofactor_need: HashMap<u64, SideRanges> = HashMap::new();
-    for (p_, k, t) in needs.cofactor {
-        cofactor_need.entry(p_).or_default().extend(k != t, t);
-    }
-    let mut cofactor_items = lucas_art_items(&cofactor_need);
-    let cofactor_lucas_val =
-        resolve_lucas_items(n, big_n, base, &mut cofactor_items, p.mem_bits, lg_n);
-    let (cofactor_acc, cofactor_terms) =
-        lucas_consumers(n, big_n, base, &cofactor_need, &cofactor_lucas_val);
-    crate::mem_profile::checkpoint("c_part: after cofactor Lucas (end)");
+    crate::mem_profile::checkpoint("c_part: after p-adic and cofactor Lucas (end)");
 
     (
         main_acc
@@ -1356,25 +1453,27 @@ fn c_part(n: u64, p: Params2) -> (u128, u64) {
 
 /// Prints an explicit heap-footprint breakdown of [`StreamNeeds`]' structures (task: "profile
 /// memory composition" — a global allocator peak alone can't say *which* structure is big).
-/// `.capacity()`, not `.len()`, since that's what's actually resident.
+/// `.capacity()`, not `.len()`, since that's what's actually resident. `cofactor_peak_len` is the
+/// largest [`CofactorResolver`] buffer ever got (doc §7 fix) — no longer a `StreamNeeds` field
+/// since it's resolved and discarded in bounded batches rather than kept for the whole run.
 #[cfg(feature = "mem-profile")]
-fn log_needs_sizes(needs: &StreamNeeds, small_primes: &[u64]) {
+fn log_needs_sizes(needs: &StreamNeeds, small_primes: &[u64], cofactor_peak_len: usize) {
     use std::mem::{size_of, size_of_val};
     let lucas_bytes = needs.lucas_small.capacity() * (size_of::<u64>() + size_of::<SideRanges>());
     let padic_bytes = needs.padic_small.capacity() * (size_of::<u64>() + size_of::<SideRanges>());
-    let cofactor_bytes = needs.cofactor.capacity() * size_of::<(u64, u64, u64)>();
+    let cofactor_bytes = cofactor_peak_len * size_of::<(u64, u64, u64)>();
     let chunk_bounds_bytes = needs.chunk_bounds.capacity() * size_of::<(u64, u64)>();
     let small_primes_bytes = size_of_val(small_primes);
     eprintln!(
         "[mem-profile] StreamNeeds breakdown: lucas_small={:.2} MiB ({} keys/primes) \
-         padic_small={:.2} MiB ({} keys/primes) cofactor={:.2} MiB ({} entries) \
+         padic_small={:.2} MiB ({} keys/primes) cofactor_peak_batch={:.2} MiB ({} entries) \
          chunk_bounds={:.2} MiB ({} chunks) small_primes={:.2} MiB ({} primes)",
         lucas_bytes as f64 / (1024.0 * 1024.0),
         needs.lucas_small.len(),
         padic_bytes as f64 / (1024.0 * 1024.0),
         needs.padic_small.len(),
         cofactor_bytes as f64 / (1024.0 * 1024.0),
-        needs.cofactor.len(),
+        cofactor_peak_len,
         chunk_bounds_bytes as f64 / (1024.0 * 1024.0),
         needs.chunk_bounds.len(),
         small_primes_bytes as f64 / (1024.0 * 1024.0),
@@ -2025,7 +2124,10 @@ mod tests {
         let base = 2 * big_m * big_n + 1;
         let m_max = base + 2 * (big_n - 1);
         let small_primes = primes_upto((m_max as f64).sqrt() as u64 + 2);
-        let needs = stream_needs_and_chunks(base, big_n, &small_primes, mem_bits);
+        let mut cofactor = Vec::new();
+        let needs = stream_needs_and_chunks(base, big_n, &small_primes, mem_bits, |p, k, t| {
+            cofactor.push((p, k, t))
+        });
 
         let mut main_items = Vec::new();
         for &(t0, t1) in &needs.chunk_bounds {
@@ -2045,7 +2147,7 @@ mod tests {
         }
 
         let mut combined_lucas = materialize_lucas(&needs.lucas_small, big_n, base);
-        for (p, k, t) in needs.cofactor {
+        for (p, k, t) in cofactor {
             combined_lucas.entry((p, t % p)).or_default().push((k, t));
         }
         let padic = materialize_padic(&needs.padic_small, big_n, base);
@@ -2129,7 +2231,7 @@ mod tests {
             let base = 2 * big_m * big_n + 1;
             let m_max = base + 2 * (big_n - 1);
             let small_primes = primes_upto((m_max as f64).sqrt() as u64 + 2);
-            let needs = stream_needs_and_chunks(base, big_n, &small_primes, mem_bits);
+            let needs = stream_needs_and_chunks(base, big_n, &small_primes, mem_bits, |_, _, _| {});
             let half = big_n / 2;
             let mut expected_start = 0u64;
             for &(t0, t1) in &needs.chunk_bounds {
@@ -2148,5 +2250,47 @@ mod tests {
                 "chunk windows don't cover [0, N/2) exactly: M={big_m} N={big_n}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Cofactor memory bound (doc §7 fix): peak buffered cofactor entries must stay O(mem_bits),
+    // not grow with N the way the old flat `Vec<(p,k,t)>` for the whole run did.
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn cofactor_flushes_keep_peak_batch_bounded() {
+        let n = 300_000u64;
+        let n0 = 20u32;
+        let mem_bits = 4096u64;
+        let p = Params2::new(n, n0, mem_bits);
+        let base = 2 * p.big_m * p.big_n + 1;
+        let lg_n = 64 - p.big_n.leading_zeros();
+        let m_max = base + 2 * (p.big_n - 1);
+        let small_primes = primes_upto((m_max as f64).sqrt() as u64 + 2);
+        let cap = CofactorResolver::batch_cap(mem_bits);
+
+        // Prove the test case is actually big enough to exercise batching: without bounding,
+        // this n produces well more than one batch's worth of cofactor entries (doc §7:
+        // "measured at 45K entries at n=1e6" — this n is smaller but still past `cap`).
+        let mut all = Vec::new();
+        stream_needs_and_chunks(base, p.big_n, &small_primes, mem_bits, |pf, k, t| {
+            all.push((pf, k, t))
+        });
+        assert!(
+            all.len() > cap * 2,
+            "test case too small to exercise batching: {} entries, cap {cap}",
+            all.len()
+        );
+
+        let mut resolver = CofactorResolver::new(n, p.big_n, base, mem_bits, lg_n);
+        stream_needs_and_chunks(base, p.big_n, &small_primes, mem_bits, |pf, k, t| {
+            resolver.push(pf, k, t)
+        });
+        assert!(
+            resolver.peak_len <= cap,
+            "peak cofactor batch {} exceeded cap {cap} even though {} entries exist total",
+            resolver.peak_len,
+            all.len()
+        );
     }
 }

@@ -304,6 +304,22 @@ because Python punishes Theorem 1's word-level loop, which is why §6.1 uses a C
   dominant *named* remaining term (as this section originally predicted it eventually would be),
   but at tens of MiB rather than the ~450 the other two bugs were masking it under. See
   `docs/nthdigit.md`'s Theorem-2 section for the full before/after/now benchmark table.
+
+  **Update 3 (2026-09-25): `cofactor` fixed too, by bounding it rather than compacting it.**
+  Update 1 above already noted grouping cofactor needs by prime (the `SideRanges` trick that
+  works for small primes) doesn't compact them — a cofactor is essentially unique to one or two
+  `k`, so the "cleverer classification" option floated back then was a dead end for the same
+  reason. What actually works: don't hold the whole run's cofactor needs at all. `CofactorResolver`
+  (`src/nthdigit2.rs`) buffers raw `(p, k, t)` triples and flushes automatically once the buffer
+  hits `O(mem_bits)` entries — regrouping just that batch into a `SideRanges` map and running it
+  through the same Lucas-item pipeline `lucas_small` already used — folding the result into a
+  running total and discarding the batch. `stream_needs_and_chunks` no longer collects `cofactor`
+  at all; it calls a plain per-find callback instead. Measured peak RSS, this machine, `--release`,
+  before/after back-to-back (so machine load isn't a confound): n=1e6 13.9 MiB -> 10.8 MiB, n=3e6
+  23.4 MiB -> 15.2 MiB, n=1e7 68.9 MiB -> 20-24 MiB. Wall-clock time was unchanged within
+  run-to-run noise at every size tested. See `src/nthdigit2.rs`'s module docs (the "Memory"
+  section) for the full writeup, including why a naive first cut at the batch size briefly looked
+  like a ~9% slowdown at n=1e7 until controlling for machine variance showed it wasn't real.
 * The p-adic tables are O(p) words, and p can reach √(2(M+1)N) *in principle*. In the Rust port,
   p-adic treatment only ever applies to primes `<= sqrt(max m_k)` (a prime above that bound
   divides `m_k` to at most the first power, by construction — see above), so its p-adic tables'
