@@ -5,3 +5,9 @@ n        bellard_s
 10000    14.03
 20000    54.17
 50000    323.66
+
+# Rust port (rust/, cargo build --release), same machine, 4 cores. Digits identical to pi.c
+# (checked n=1,100,1000,10^4 and 5*10^4).
+n        naive_1t_s   fast_1t_s   fast_4t_s
+10000    10.16        2.52        0.81
+20000    41.28        9.15        3.10
