@@ -11,3 +11,16 @@ n        bellard_s
 n        naive_1t_s   fast_1t_s   fast_4t_s
 10000    10.16        2.52        0.81
 20000    41.28        9.15        3.10
+
+# pi1.c (Bellard's Feb 1997 Gosper-formula variant, same output as pi.c), gcc -O3, 1 thread.
+n        pi1_s
+10000    3.25
+20000    12.36
+50000    74.38
+
+# pi_bin.c (binary/hex digits via Bellard's 1997 pi_bin formula; our implementation, O(d log d)).
+# Verified: d=0 -> 243F6A88, d=999999 -> 26C65E52 (known hex digits).
+d (hex pos-1)   seconds
+1000000         1.06
+10000000        12.22
+100000000       135.69
