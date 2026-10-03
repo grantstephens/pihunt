@@ -65,6 +65,16 @@ change the argument, since they are pure weight-2/3 periods.
   equivalent. **Negative result**: half the syncs, but 2–6× slower at every n, because
   double-double square roots and divides dominate the corner rotation.
 
+## Bellard's formula as a rediscovery check
+
+`batches/bellard.toml` runs Bellard's 1997 base-2^10 formula through the same pipeline. The
+`(-1)^k / 2^(10k)` weight needs a negative base, which `Shape` doesn't support, so pairs of
+terms are folded together: base 2^20, period 40, 41 columns, `C = 10^7`, 517 digits. PSLQ finds
+it in about 38 s (classic finder, one core) and the hit verifies at 2× precision. `src/known.rs`
+holds two forms of it, the directly folded one and the one PSLQ returns after the reduction
+drops dependent columns; they differ by zero relations, and `tests/known.rs` checks both
+numerically. This is a larger and differently-shaped sanity check than BBP at b=16, m=8.
+
 ## Next direction
 
 Attack the cost of *existing* decimal digit extraction (Plouffe/Bellard/Gourdon, ~O(n²) time,
