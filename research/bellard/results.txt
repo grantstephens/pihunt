@@ -1,0 +1,7 @@
+# Bellard pi.c (gcc -O3 -march=native), measured 2026-10-03, single thread, shared cloud VM.
+# Digits agree with the CLI-position table in docs/nthdigit.md (n=10^4: 856672279...).
+n        bellard_s
+1000     0.18
+10000    14.03
+20000    54.17
+50000    323.66
