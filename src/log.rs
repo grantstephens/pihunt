@@ -59,6 +59,11 @@ pub struct Record {
     pub outcome: Kind,
     /// Exclusion bound reached, formatted like "1.2e5". None for skipped jobs.
     pub bound: Option<String>,
+    /// How close the reduction's best candidate got to a relation (smallest `|y_i|` over the
+    /// detection threshold `eps` at termination; `>= 1`, closer to 1 is nearer). None for
+    /// skipped jobs or logs written before this field existed. See `Outcome::closeness`.
+    #[serde(default)]
+    pub closeness: Option<f64>,
     pub iterations: u64,
     /// Aligned with `columns`; present for hit/junk/suspicious/spurious.
     pub relation: Option<Vec<String>>,

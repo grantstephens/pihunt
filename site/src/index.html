@@ -513,6 +513,44 @@
     was implementation overhead, not the deliberate trade); Theorem 1's stays flat at a few MiB,
     genuinely O(log&sup2;&nbsp;n). Theorem 2 is faster at every position measured from 10,000 up,
     by a growing margin: about 2&times; at 10,000, roughly 60&times; at 10,000,000.</p>
+
+  <h3>Other existing algorithms: Bellard's <code>pi.c</code> / <code>pi1.c</code> (1997)</h3>
+  <p><span class="badge badge-measured">measured</span> Every comparison above is this site's own
+    two methods plus one unreproducible historical baseline. Fabrice Bellard's 1997
+    <a href="https://bellard.org/pi/pi_n2/pi_n2.html"><code>pi.c</code></a> is a different
+    author's implementation of a different algorithm: a refinement of Plouffe's 1996 any-base
+    n-th-digit method down to O(n&sup2;) time, O(log&nbsp;n) memory; <code>pi1.c</code> is a
+    ~4&times; faster variant of the same algorithm using Gosper's series. Both re-measured here,
+    same machine as the table above (<code>gcc -O3 -march=native</code>):</p>
+
+  <div class="table-scroll">
+  <table class="numeric-table">
+    <caption class="visually-hidden">Benchmark table: Theorem 1, Theorem 2, and Bellard's pi.c/pi1.c</caption>
+    <thead>
+      <tr>
+        <th scope="col">Position n</th>
+        <th scope="col">Theorem 2</th>
+        <th scope="col">Theorem 1</th>
+        <th scope="col"><code>pi1.c</code> (Gosper)</th>
+        <th scope="col"><code>pi.c</code></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>10,000</td><td>16&nbsp;ms</td><td>24&nbsp;ms</td><td>2.10&nbsp;s</td><td>7.87&nbsp;s</td></tr>
+      <tr><td>20,000</td><td>49&nbsp;ms</td><td>73&nbsp;ms</td><td>8.03&nbsp;s</td><td>30.15&nbsp;s</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="fine-print">All four agree on digits at both positions &mdash; a free correctness
+    cross-check, since <code>pi.c</code>/<code>pi1.c</code> are a completely independent
+    implementation of a completely independent algorithm. The table stops at 20,000: O(n&sup2;)
+    means <code>pi.c</code> already crosses 5 minutes by n&nbsp;=&nbsp;50,000, and the gap only
+    widens from here &mdash; Theorem 1 (the same O(n&sup2;) class, just a different formula) shows
+    the same widening trend against Theorem 2 in the table above out to 10,000,000. See
+    <code>research/bellard/</code> in the source for the full methodology, a Rust port with a
+    threaded/Montgomery-arithmetic variant (still O(n&sup2;) &mdash; same conclusion, faster
+    constant), and <code>pi_bin.c</code>, our own implementation of bellard.org/pi's n-th
+    <em>binary</em>-digit formula (a different base, not comparable to the table above).</p>
 </section>
 
 <section id="verification">

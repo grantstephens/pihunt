@@ -2,7 +2,8 @@
 
 use crate::basis::Shape;
 use crate::pslq::primitive;
-use rug::Integer;
+use rug::{Integer, ops::Pow};
+use std::collections::HashMap;
 
 struct Known {
     base: u32,
@@ -134,4 +135,95 @@ pub fn is_known(shape: &Shape, names: &[String], relation: &[Integer]) -> bool {
                     .zip(&found)
                     .all(|(w, f)| w.0 == f.0 && f.1 == w.1)
         })
+}
+
+/// True if `relation` is a mechanical corollary of some entry in [`KNOWN`]: a "base power +
+/// period multiple" descendant, not an independent new formula.
+///
+/// Two trivial moves generate corollaries from any base-`b0`, period-`m0` relation among
+/// `S(b0,m0,j,s)` columns (plus base-independent terms like π, π², log 2, ...):
+///
+/// - **Base power** (any `t ≥ 1`): splitting the index `k = t·k' + r` gives
+///   `S(b0,m0,j,s) = Σ_{r=0}^{t-1} b0^(-r)·S(b0^t, m0·t, m0·r+j, s)`.
+/// - **Period multiple** (any `d ≥ 1`, same base): `S(B,M,J,s) = d^s·S(B, M·d, J·d, s)`.
+///
+/// Composing both and clearing the `b0^(-r)` fractions by scaling the whole equation by
+/// `b0^(t-1)` gives an exact, checkable relation at base `B = b0^t`, period `M = m0·t·d`. If the
+/// candidate's base/period fit that pattern for some known entry and some `(t, d)`, and the
+/// predicted relation matches the candidate's up to the usual gcd/sign normalisation, it's that
+/// descendant, not a discovery. See `docs/findings-bbp-hunt.md` ("a NEW hit that wasn't") for the
+/// worked example (base 256, period 32 — a `t=2, d=2` descendant of the 1996 BBP formula) that
+/// motivated this check.
+pub fn is_derived(shape: &Shape, names: &[String], relation: &[Integer]) -> bool {
+    let rel = primitive(relation);
+    let idx: HashMap<&str, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    KNOWN.iter().any(|k| {
+        let Some(t) = exact_power(shape.base, k.base) else {
+            return false;
+        };
+        let denom = k.period * t;
+        if denom == 0 || !shape.period.is_multiple_of(denom) {
+            return false;
+        }
+        let d = shape.period / denom;
+        match predicted_relation(k, t, d, &idx, names.len()) {
+            Some(predicted) => primitive(&predicted) == rel,
+            None => false,
+        }
+    })
+}
+
+/// Smallest `t` with `root^t == base`, or `None` if `base` isn't an exact power of `root`.
+fn exact_power(base: u32, root: u32) -> Option<u32> {
+    if root < 2 {
+        return None;
+    }
+    let mut val = root as u64;
+    let mut t = 1u32;
+    while val < base as u64 {
+        val *= root as u64;
+        t += 1;
+    }
+    (val == base as u64).then_some(t)
+}
+
+/// Parses `"S(j=J,s=S)"` into `(J, S)`; `None` for non-series columns (π, extras).
+fn parse_series_name(name: &str) -> Option<(u32, u32)> {
+    let rest = name.strip_prefix("S(j=")?;
+    let (j, rest) = rest.split_once(",s=")?;
+    let s = rest.strip_suffix(')')?;
+    Some((j.parse().ok()?, s.parse().ok()?))
+}
+
+/// The base-power (`t`) + period-multiple (`d`) descendant of `k`, aligned to `names`'
+/// column order. `None` if the descendant shape doesn't have a matching column for some term
+/// (e.g. the candidate's degree range doesn't cover a term's `s`).
+fn predicted_relation(
+    k: &Known,
+    t: u32,
+    d: u32,
+    idx: &HashMap<&str, usize>,
+    len: usize,
+) -> Option<Vec<Integer>> {
+    let mut predicted = vec![Integer::new(); len];
+    for &(name, coeff) in k.terms {
+        if let Some((j0, s0)) = parse_series_name(name) {
+            for r in 0..t {
+                let j = d * (k.period * r + j0);
+                let col = format!("S(j={j},s={s0})");
+                let i = *idx.get(col.as_str())?;
+                let weight = Integer::from(k.base).pow(t - 1 - r) * Integer::from(d).pow(s0);
+                predicted[i] += Integer::from(coeff) * weight;
+            }
+        } else {
+            let i = *idx.get(name)?;
+            let weight = Integer::from(k.base).pow(t - 1);
+            predicted[i] += Integer::from(coeff) * weight;
+        }
+    }
+    Some(predicted)
 }

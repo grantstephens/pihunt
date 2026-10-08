@@ -393,6 +393,116 @@ exponent measurement.
   37, the Feynman point, ~100 random positions up to 20000, and ~45 random positions up to
   ~42000 across three `mem_bits` regimes) — part of the default `cargo test` run, all green.
 
+### Comparison against Bellard's existing n-th-digit implementations
+
+Every other comparison in this doc is Theorem 1 vs Theorem 2 vs each other, plus one external,
+unreproducible baseline (`pidec` on a 2003 Pentium III). `research/bellard/` adds a real,
+independently-authored O(n²)-time algorithm to the mix: Fabrice Bellard's 1997 `pi.c`/`pi1.c`
+(<https://bellard.org/pi/pi_n2/pi_n2.html> is the article; `pi.c` is a refinement of Plouffe's
+1996 any-base n-th-digit algorithm down to O(n²) time, O(log n) memory, and `pi1.c` is a ~4×
+faster variant using Gosper's series for the same quantity — not a different algorithm). Both
+re-measured on this doc's own machine (AMD Ryzen 7 5700G, 6 cores, `gcc -O3 -march=native`) rather
+than reusing `research/bellard/results.txt`'s original cloud-VM numbers, which weren't comparable
+to anything else in this table:
+
+| n | Theorem 2 | Theorem 1 | `pi1.c` (Gosper, 1997) | `pi.c` (1997) | `pidec` (2003, different HW) |
+|---:|---:|---:|---:|---:|---:|
+| 10⁴ | 16 ms | 24 ms | 2.10 s | 7.87 s | 3.13 s |
+| 2·10⁴ | 49 ms | 73 ms | 8.03 s | 30.15 s | — |
+
+All four local methods agree on digits at both positions (`8566722796` at 10⁴, `8203856539` at
+2·10⁴) — an independent correctness cross-check for free, since `pi.c`/`pi1.c` are a completely
+separate author's implementation of a completely separate algorithm. `pi1.c`'s 1997-vs-1997
+speedup over `pi.c` here (3.7-3.75×) matches `research/bellard/README.md`'s own figure (~4.4×)
+closely enough to be the same effect, not a fluke.
+
+O(n²) means there's no point extending this table rightward: `pi.c` crosses 5 minutes by n=5·10⁴
+(`research/bellard/results.txt`), and Theorem 2's whole premise is being asymptotically faster
+than exactly this family of algorithm — the gap only widens from here, as the rest of this doc's
+tables already show against Theorem 1 (the same O(n²) class). `research/bellard/rust/` separately
+ports both `pi.c` and `pi1.c` to Rust — each with a naive (line-for-line) variant and a
+Montgomery/batched-inversion/threaded `fast` one — as its own case study in how much of
+Bellard-vs-Theorem-2 is "1997 C" vs "O(n²) algorithm". It doesn't change the conclusion above,
+since every variant stays O(n²), but the numbers (same machine, same session;
+`research/bellard/README.md` has the full writeup) are a good demonstration of how much headroom
+"just engineering" leaves on the table for an unchanged O(n²) algorithm:
+
+| | naive, 1 thread | fast, 1 thread | fast, 6 threads |
+|---|---:|---:|---:|
+| `pi.c` (C) | 7.87 s | — | — |
+| `pi.c` (Rust) | 3.07 s | 1.29 s | 0.24 s |
+| `pi1.c` (C) | 2.10 s | — | — |
+| `pi1.c` (Rust) | 0.91 s | 0.23 s | 0.06 s |
+
+(n=10⁴ throughout; the two `fast` columns reflect a follow-up optimization below, so the 6-thread
+column is tighter than a first pass would show, and the sub-100ms entries there carry more
+run-to-run noise than the rest.) Reading it two ways: `pi1`'s *naive* Rust port alone is already
+~2.3× faster than `pi.c`'s original C — a bigger language/compiler gap than `pi.c`'s own naive
+port shows (~1.4×), plausibly because `pi1.c`'s heavier per-k inner loop (four factor-stripping
+terms instead of two, plus a costlier modular inverse) gives whatever's driving that gap more
+work to amortise over. And fully optimized, `pi1` fast on 6 threads is **~53× faster than the
+original `pi1.c`** (n=2·10⁴, the more reliable scale: 8.03 s → 0.152 s), and ~5.6× faster than
+`pi.c`'s own fast variant on the same cores — Gosper's algorithmic edge and the engineering
+compound rather than trade off. `pi1`'s `fast` variant has one necessary exception: the single
+prime `a == 2` can't use Montgomery arithmetic (it needs an odd modulus, and `av = 2^vmax` there
+never is), so it falls back to the naive per-k computation just for that one prime out of
+thousands — unmeasurable cost, not a correctness compromise. Every variant cross-checked against
+its C program's real output (not just known reference digits) at five positions spanning four
+orders of magnitude.
+
+**A follow-up optimization pass, and one rejected.** `Mont::mul`'s final conditional subtract
+(`if u >= n { u - n } else { u }`) was a plain, data-dependent, ~50/50 branch — and, measured,
+*not* something LLVM was already compiling branchlessly. Replacing it with a wrapping-subtract +
+sign-mask (`reduce_once` in `rust/src/main.rs`) is where the `fast`-column improvement above over
+the first pass comes from: a real ~12% (`pi.c`) to ~20-25% (`pi1`, bigger because its heavier
+per-k loop calls `Mont::mul` more often) speedup, confirmed with repeated A/B timing, not a
+one-off. The same trick applied to the batch accumulator's equivalent branch
+(`s += t; if s >= av { s -= av }` in `flush!`) was tried too, on the same reasoning — and measured
+a small, *reproducible regression* (~1.5-2%) instead, so it was reverted. Not every data-dependent
+branch is a free win just because it looks like the one that was.
+
+The bigger idea on the list, SIMD across primes (four different primes in lockstep via AVX2,
+vectorising the Montgomery-multiply chain that runs on every `k`), was also tried —
+`--formula pi1-simd4`, a separate formula so it can't touch the `pi`/`pi1` numbers above.
+Carefully verified (the core 4-lane multiply unit-tested against scalar REDC on 20,000 random
+inputs; the full algorithm unit-tested per-lane against `prime_frac_fast_gosper`, not just
+checked end-to-end) and then measured: it's consistently **~7-8% slower** than `pi1` fast, not
+faster, across every size and thread count tried. Kept in the tree as a documented negative
+result rather than quietly dropped. Root-caused afterward with `perf` (installed partway through
+this investigation specifically to stop guessing): the vector accumulators were being spilled to
+the stack and reloaded every single iteration rather than kept in registers — one reload alone
+was ~25% of the hot function's own samples, and static disassembly confirmed it isn't register
+scarcity (only 5 of 16 YMM registers were even in use). Four targeted fixes were tried — isolating
+the update into its own call, shrinking the per-lane buffers, and two escalating `asm!`
+register-pin hints (one-sided, then symmetric) — and all four produced the *identical* spill,
+down to the exact instruction. A real fix would need the whole update rewritten as one opaque
+hand-written assembly block rather than a hint around existing codegen — scoped out as a
+materially larger, correctness-critical undertaking for an uncertain slice of an already-modest
+gap. A third, structurally different angle — vectorising the batched-inverse extraction in
+`flush_lane` instead of the main loop, which has no loop-carried dependency and a single shared
+modulus (neither property the main loop's spill needed) — was also tried: measured ~29% *slower*,
+traced to the cost of gathering `pa[be[i]]` for four data-dependent indices rather than the
+vectorisation itself (confirmed by isolating a scalar-but-still-two-pass version, which matched
+the original baseline exactly). See `research/bellard/README.md`'s "Update" sections for the full
+measurements across all three angles.
+
+Two other things linked from bellard.org/pi are **not** in this table on purpose: the "exotic"
+1997 PSLQ-discovered BBP-type series for π (already captured, for a different reason, as a
+PSLQ-hunt rediscovery check — see `docs/findings-bbp-hunt.md`'s "Bellard's formula as a
+rediscovery check") and Gourevitch & Guillera's 2003 binomial-sum paper on proving such formulas.
+Neither is an n-th-digit *algorithm* to benchmark — one's a closed-form value for π itself (useful
+for binary splitting, not single-digit extraction), the other's a proof technique. The 2009
+"2700 billion digits" record on the same page ships no source and was already out of scope before
+this round (`research/bellard/README.md`'s own table says so).
+
+`pi_bin.c` (n-th *binary*/hex digit, a different base entirely — not comparable to the decimal
+table above) is our own implementation of bellard.org/pi's `pi_bin` article, since the page itself
+ships no code for it. Re-measured here too: 0.29 s at 10⁶ hex digits, 3.30 s at 10⁷ — both
+cross-checked against known hex digits (`6C65E52C` at the 10⁶th, `7AF5863E` at the 10⁷th),
+consistent with `research/bellard/results.txt`'s original cloud-VM figures scaled by roughly the
+same ~3.6-3.7× this machine runs faster across the board (not independently re-verified for
+O(d log d) scaling beyond what `results.txt` already measured).
+
 ### Memory: what's actually `O(mem_bits)` here (read this before trusting the RSS numbers)
 
 **This section is now current as of the 2026-09-23 memory-profiling session** (superseding the

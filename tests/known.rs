@@ -1,5 +1,5 @@
-use pihunt::basis::Shape;
-use pihunt::known::is_known;
+use pihunt::basis::{Extra, Shape};
+use pihunt::known::{is_derived, is_known};
 use rug::Integer;
 
 fn ints(v: &[i64]) -> Vec<Integer> {
@@ -101,7 +101,10 @@ fn bellard_forms_are_genuine_relations_and_known() {
         for (c, x) in rel.iter().zip(&cols) {
             sum += rug::Float::with_val(1800, x * c);
         }
-        assert!(sum.is_zero() || sum.get_exp().unwrap() < -1700, "residual {sum:e}");
+        assert!(
+            sum.is_zero() || sum.get_exp().unwrap() < -1700,
+            "residual {sum:e}"
+        );
         assert!(is_known(&shape, &names, &rel));
     }
 }
@@ -113,4 +116,88 @@ fn bellard_rejects_near_miss() {
     let mut rel = bellard_relation(&shape, BELLARD_DIRECT);
     rel[38] = Integer::from(3);
     assert!(!is_known(&shape, &names, &rel));
+}
+
+/// `batches/base2-focused.toml`'s real hit at base=256, period=32: base 256 = 16^2 (t=2 radix
+/// split of BBP's base 16, period 8), then period-multiplied by d=2 (16 -> 32). Not a new
+/// formula -- see docs/findings-bbp-hunt.md.
+#[test]
+fn recognises_bbp_base_power_and_period_multiple_descendant() {
+    let shape = Shape::new(256, 32, 1, 1, vec![]);
+    let names = shape.column_names();
+    let mut rel = vec![0i64; shape.columns()];
+    rel[0] = 8;
+    for &(j, c) in &[
+        (2, -64),
+        (8, 32),
+        (10, 16),
+        (12, 16),
+        (18, -4),
+        (24, 2),
+        (26, 1),
+        (28, 1),
+    ] {
+        rel[j] = c;
+    }
+    let rel = ints(&rel);
+    assert!(
+        !is_known(&shape, &names, &rel),
+        "not a verbatim known entry"
+    );
+    assert!(is_derived(&shape, &names, &rel));
+}
+
+/// Same base/period as above, but an unrelated relation -- must not match just because the
+/// shape happens to be a BBP descendant.
+#[test]
+fn rejects_unrelated_relation_at_a_descendant_shape() {
+    let shape = Shape::new(256, 32, 1, 1, vec![]);
+    let names = shape.column_names();
+    let mut rel = vec![0i64; shape.columns()];
+    rel[0] = 1;
+    rel[2] = -1;
+    let rel = ints(&rel);
+    assert!(!is_derived(&shape, &names, &rel));
+}
+
+/// Bailey's base-64 pi^2 formula (period 6, degree 2, extra pi2) radix-split with t=2 to base
+/// 4096 = 64^2, period 12, d=1 (no period multiply this time).
+#[test]
+fn recognises_bailey_pi2_base_power_descendant() {
+    let shape = Shape::new(4096, 12, 2, 2, vec![Extra::Pi2]);
+    let names = shape.column_names();
+    let mut rel = vec![0i64; shape.columns()];
+    for &(j, c) in &[
+        (1, 9216),
+        (2, -13824),
+        (3, -4608),
+        (4, -3456),
+        (5, 576),
+        (7, 144),
+        (8, -216),
+        (9, -72),
+        (10, -54),
+        (11, 9),
+    ] {
+        rel[j] = c;
+    }
+    *rel.last_mut().unwrap() = -512; // pi2, the last column
+    let rel = ints(&rel);
+    assert!(is_derived(&shape, &names, &rel));
+}
+
+/// 512 = 2^9 isn't a power of 16, 64, or 2^20 at a period any known formula's radix split +
+/// period-multiply reaches -- a hit here can't be waved away by this mechanism.
+#[test]
+fn clean_base_is_not_derived_from_anything() {
+    let shape = Shape::new(512, 8, 1, 1, vec![]);
+    let names = shape.column_names();
+    let mut rel = vec![0i64; shape.columns()];
+    rel[0] = 1;
+    rel[1] = -4;
+    rel[4] = 2;
+    rel[5] = 1;
+    rel[6] = 1;
+    let rel = ints(&rel);
+    assert!(!is_derived(&shape, &names, &rel));
 }

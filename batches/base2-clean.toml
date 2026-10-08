@@ -1,0 +1,35 @@
+# Follow-up to batches/base2-focused.toml. That batch's 17 bases included 5 that are exact
+# powers of 16 or 64 (256, 4096, 65536, 262144, 16777216) -- provable corollaries of the 1996 BBP
+# formula and/or Bailey's base-64 pi^2 formula (see docs/findings-bbp-hunt.md, `known::is_derived`
+# in src/known.rs). Searching them again just spends budget on hits the tooling now auto-tags
+# `derived` on sight. This batch drops them and keeps only the 12 bases in the swept range that
+# aren't a radix-split + period-multiply descendant of anything in `known::KNOWN` -- the only
+# places left where a hit would still mean something.
+#
+# Every job now also logs `closeness` (Outcome::closeness -- how close the reduction's best
+# candidate got to a relation, `min|y_i|/eps` at termination; see src/pslq/mod.rs). This batch's
+# real purpose is building up that richer per-shape dataset, not just another blind sweep --
+# `closeness` is the continuous signal a future regression/ranking over (base, period, degree,
+# extras) would actually have something to fit, unlike the plain hit/excluded outcome.
+name   = "base2-clean"
+output = "results/base2-clean.jsonl"
+
+[defaults]
+coeff_bound = 10000000
+finder      = "multilevel"
+escalate    = 2
+max_columns = 100
+
+[search]
+mode = "sample"
+bases = [
+  32, 128, 512, 2048, 8192, 16384, 32768, 131072, 524288, 2097152, 4194304, 8388608,
+]
+periods = { from = 2, to = 64 }
+degrees = [[1, 1], [1, 2]]
+extras  = [[], ["log2"], ["pi2", "log2", "log3", "log5", "catalan", "zeta3"]]
+
+[sample]
+method = "lhs"
+count  = 260
+seed   = 2001

@@ -1,0 +1,33 @@
+# Follow-up to batches/base2-exotic.toml after a correction (see docs/findings-bbp-hunt.md):
+# that batch's 7 non-power-of-2 bases (3, 5, 6, 7, 9, 11, 13) were never open territory --
+# Borwein-Borwein-Galway (2004) prove no degree-1 Machin-type BBP formula for pi exists in any
+# base that isn't a power of 2, base 3 being one of their own worked examples. This batch drops
+# them entirely and spends the freed sample budget on the only part of the (base, period, degree,
+# extras) space theory doesn't already foreclose: powers of 2. Same 17 bases as base2-exotic.toml
+# (2^5..2^24, skipping 2^4/2^6/2^20 -- already covered by known.toml/bellard.toml), but periods
+# widened 2-48 -> 2-64 and the LHS sample count raised 150 -> 220 (proportionate to removing ~30%
+# of the base axis and adding headroom on periods), new seed so this isn't a re-run of the same
+# LHS draw.
+name   = "base2-focused"
+output = "results/base2-focused.jsonl"
+
+[defaults]
+coeff_bound = 10000000
+finder      = "multilevel"
+escalate    = 2
+max_columns = 100
+
+[search]
+mode = "sample"
+bases = [
+  32, 128, 256, 512, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
+  524288, 2097152, 4194304, 8388608, 16777216,
+]
+periods = { from = 2, to = 64 }
+degrees = [[1, 1], [1, 2]]
+extras  = [[], ["log2"], ["pi2", "log2", "log3", "log5", "catalan", "zeta3"]]
+
+[sample]
+method = "lhs"
+count  = 220
+seed   = 1998

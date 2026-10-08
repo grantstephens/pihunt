@@ -25,6 +25,7 @@ pub fn run_job(job: &Job, batch: &str, finder: &dyn RelationFinder, max_columns:
         dropped: vec![],
         outcome: Kind::Skipped,
         bound: None,
+        closeness: None,
         iterations: 0,
         relation: None,
         verify: None,
@@ -48,6 +49,7 @@ pub fn run_job(job: &Job, batch: &str, finder: &dyn RelationFinder, max_columns:
             rec.dropped = dropped_records(job, &names, &dropped);
             rec.outcome = Kind::Inconclusive;
             rec.bound = Some(fmt_bound(outcome.bound()));
+            rec.closeness = Some(outcome.closeness());
             rec.iterations = outcome.iterations();
             rec.note = Some(match &outcome {
                 Outcome::Relation { coeffs, .. } => {
@@ -86,6 +88,7 @@ pub fn run_job(job: &Job, batch: &str, finder: &dyn RelationFinder, max_columns:
     let v = classify(&job.shape, &cols, &outcome, relation, job.coeff_bound);
     rec.outcome = v.kind;
     rec.bound = Some(fmt_bound(outcome.bound()));
+    rec.closeness = Some(outcome.closeness());
     rec.iterations = outcome.iterations();
     rec.relation = v
         .relation

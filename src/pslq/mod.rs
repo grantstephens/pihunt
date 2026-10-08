@@ -25,19 +25,23 @@ pub enum Outcome {
         coeffs: Vec<Integer>,
         iterations: u64,
         bound: f64,
+        closeness: f64,
     },
     /// No relation with max |coefficient| ≤ coeff_bound exists.
     Excluded {
         bound: f64,
         iterations: u64,
+        closeness: f64,
     },
     PrecisionExhausted {
         bound: f64,
         iterations: u64,
+        closeness: f64,
     },
     IterationCap {
         bound: f64,
         iterations: u64,
+        closeness: f64,
     },
 }
 
@@ -57,6 +61,21 @@ impl Outcome {
             | Outcome::Excluded { bound, .. }
             | Outcome::PrecisionExhausted { bound, .. }
             | Outcome::IterationCap { bound, .. } => *bound,
+        }
+    }
+
+    /// How close the reduction's best candidate got to a relation: the smallest `|y_i|` at
+    /// termination, divided by the detection threshold `eps`. `< 1` means a relation was found
+    /// (`Outcome::Relation`); `>= 1` for every other outcome, and the closer to 1, the nearer
+    /// this shape came to one without quite getting there. Purely observational — never
+    /// affects exclusion/hit logic, just richer per-job data for later analysis (e.g. picking
+    /// where to sample next). See `docs/findings-bbp-hunt.md`.
+    pub fn closeness(&self) -> f64 {
+        match self {
+            Outcome::Relation { closeness, .. }
+            | Outcome::Excluded { closeness, .. }
+            | Outcome::PrecisionExhausted { closeness, .. }
+            | Outcome::IterationCap { closeness, .. } => *closeness,
         }
     }
 }

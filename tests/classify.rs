@@ -19,6 +19,7 @@ fn rel_outcome(v: &[i64]) -> Outcome {
         coeffs: ints(v),
         iterations: 1,
         bound: 1.0,
+        closeness: 0.5,
     }
 }
 
@@ -28,6 +29,7 @@ fn non_relations() {
     let ex = Outcome::Excluded {
         bound: 5e4,
         iterations: 9,
+        closeness: 2.0,
     };
     assert_eq!(
         classify(&shape, &cols, &ex, None, 1000).kind,
@@ -36,6 +38,7 @@ fn non_relations() {
     let pe = Outcome::PrecisionExhausted {
         bound: 5.0,
         iterations: 9,
+        closeness: 2.0,
     };
     assert_eq!(
         classify(&shape, &cols, &pe, None, 1000).kind,
@@ -44,6 +47,7 @@ fn non_relations() {
     let ic = Outcome::IterationCap {
         bound: 5.0,
         iterations: 9,
+        closeness: 2.0,
     };
     assert_eq!(
         classify(&shape, &cols, &ic, None, 1000).kind,
@@ -59,6 +63,32 @@ fn bbp_is_known_hit_with_positive_pi() {
     assert_eq!(v.kind, Kind::Hit);
     assert_eq!(v.tag.as_deref(), Some("known"));
     assert_eq!(v.relation, Some(ints(&[1, -4, 0, 0, 2, 1, 1, 0, 0])));
+    assert!(v.verify.unwrap().passed);
+}
+
+#[test]
+fn bbp_base_power_descendant_is_tagged_derived_not_new() {
+    // base=256, period=32: the base2-focused search's real hit, a t=2 (base power) + d=2
+    // (period multiple) descendant of the 1996 BBP formula -- see docs/findings-bbp-hunt.md.
+    let shape = Shape::new(256, 32, 1, 1, vec![]);
+    let cols = Columns::build(&shape, 200);
+    let mut r = vec![0i64; shape.columns()];
+    r[0] = 8;
+    for &(j, c) in &[
+        (2, -64),
+        (8, 32),
+        (10, 16),
+        (12, 16),
+        (18, -4),
+        (24, 2),
+        (26, 1),
+        (28, 1),
+    ] {
+        r[j] = c;
+    }
+    let v = classify(&shape, &cols, &rel_outcome(&r), Some(ints(&r)), 1000);
+    assert_eq!(v.kind, Kind::Hit);
+    assert_eq!(v.tag.as_deref(), Some("derived"));
     assert!(v.verify.unwrap().passed);
 }
 
