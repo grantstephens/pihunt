@@ -165,6 +165,28 @@ pub fn powmod(mut base: u64, mut exp: u64, m: u64) -> u64 {
     result
 }
 
+/// `a * b mod m`, for `a <= 4` and `m < 2^62` (every real modulus in this module, per
+/// [`Montgomery::new`]'s documented bound). [`mulmod`]'s `u128` intermediate exists to hold a
+/// product of two values that can both be up to `m - 1`; when one side is this small, `a * b`
+/// fits in a `u64` outright (`<= 4 * (2^62 - 1) < 2^64`), so the whole thing is plain `u64`
+/// arithmetic — one hardware `div` for the final `% m`, not `__umodti3`.
+#[inline]
+fn mulmod_small(a: u64, b: u64, m: u64) -> u64 {
+    debug_assert!(a <= 4, "only meant for the tiny-multiplier case");
+    a.wrapping_mul(b) % m
+}
+
+/// `2^64 mod m`, for any `m >= 1`. The direct computation (`(1u128 << 64) % m as u128`) is a
+/// `u128 % u128`, which compiles to the software `__umodti3` routine regardless of `m`'s actual
+/// size (x86-64 has no hardware instruction for a full 128÷128 divide). Since the dividend here
+/// is the fixed constant `2^64 = u64::MAX + 1`, this avoids that entirely: `u64::MAX % m` is a
+/// plain `u64 % u64` (one hardware `div`), and `2^64 mod m` is just that plus one, wrapped back
+/// into `[0, m)` for the case for `u64::MAX % m == m - 1`.
+#[inline]
+fn two_pow_64_mod(m: u64) -> u64 {
+    (u64::MAX % m).wrapping_add(1) % m
+}
+
 /// Montgomery multiplication context for a fixed *odd* modulus `m`. Every modulus in this
 /// module is odd (`m_k = 2MN + 2k + 1` and `2k + 1` in `b_sum` are both of the form `2x+1`),
 /// so this applies everywhere `mulmod`'s repeated `u128` divisions show up as the hot loop's
@@ -215,7 +237,7 @@ impl Montgomery {
             "inv must be the exact inverse of m mod 2^64"
         );
         let m_inv_neg = inv.wrapping_neg();
-        let r_mod_m = ((1u128 << 64) % m as u128) as u64;
+        let r_mod_m = two_pow_64_mod(m);
         let r2_mod_m = mulmod(r_mod_m, r_mod_m, m);
         Montgomery {
             m,
@@ -305,29 +327,62 @@ pub(crate) fn mod_inverse(a: u64, m: u64) -> u64 {
     (((x % m as i128) + m as i128) % m as i128) as u64
 }
 
+/// `((hi as u128) << 64 | lo as u128) / d` and `% d`, via the native x86-64 `div` instruction
+/// instead of the portable `u128 / u128` / `u128 % u128` (`__udivti3`/`__umodti3`, a slow
+/// software routine — x86-64 has no hardware instruction for a full 128÷128 divide; see
+/// `docs/nthdigit.md`). The hardware instruction handles exactly the 128-by-64 case directly,
+/// in one instruction, but *only* when the quotient fits in 64 bits (`hi < d`) — every caller
+/// must guarantee this structurally, since violating it faults the whole process (`SIGFPE`),
+/// not a catchable panic. [`frac_fixed_point`]'s two call sites both do (see there).
+///
+/// Falls back to the portable computation on non-x86-64 targets (this crate also builds for
+/// WASM under the `pure` backend).
+#[inline]
+fn divrem_u128_by_u64(hi: u64, lo: u64, d: u64) -> (u64, u64) {
+    debug_assert!(hi < d, "quotient would overflow 64 bits");
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut quot = lo;
+        let mut rem = hi;
+        // SAFETY: `div` requires `hi < d` (checked above) and `d != 0` (`frac_fixed_point`
+        // asserts `m > 0`, and `d` is always that `m`) — exactly the hardware precondition
+        // for a 128-by-64 divide that doesn't fault. No memory or stack use, and every output
+        // is declared, so `nomem, nostack` is accurate.
+        unsafe {
+            core::arch::asm!(
+                "div {d}",
+                inout("rax") quot,
+                inout("rdx") rem,
+                d = in(reg) d,
+                options(nomem, nostack),
+            );
+        }
+        (quot, rem)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let x = ((hi as u128) << 64) | lo as u128;
+        ((x / d as u128) as u64, (x % d as u128) as u64)
+    }
+}
+
 /// `floor((x mod m) * 2^128 / m)` as an exact `u128`: `x/m` encoded as a 128-bit
 /// fixed-point fraction in `[0, 1)`. Requires `x < m`.
 ///
 /// Computed by explicit long division of the 192-bit numerator `x * 2^128` (three 64-bit
 /// limbs: `x`, `0`, `0`, most significant first) by the 64-bit divisor `m`, one limb at a
-/// time, entirely in exact `u128` arithmetic (each per-limb quotient and remainder fits
-/// comfortably in `u128` since the running remainder is always `< m <= 2^64`). This is
+/// time, via [`divrem_u128_by_u64`] (each per-limb quotient and remainder fits in `u64` since
+/// the running remainder is always `< m`, the hardware `div`'s own precondition). This is
 /// exact: the only "error" is the final `floor`, i.e. strictly less than one ulp = `2^-128`.
 pub fn frac_fixed_point(x: u64, m: u64) -> u128 {
     debug_assert!(m > 0);
     debug_assert!(x < m);
-    let m128 = m as u128;
     // First limb is x itself (remainder after it is just x, since x < m means the
-    // quotient contribution of this limb is 0).
-    let r = x as u128;
-    // Second limb (value 0).
-    let cur = r << 64;
-    let q_hi = cur / m128;
-    let r = cur % m128;
-    // Third limb (value 0).
-    let cur = r << 64;
-    let q_lo = cur / m128;
-    (q_hi << 64) | q_lo
+    // quotient contribution of this limb is 0). Second limb (value 0): divide x << 64.
+    let (q_hi, r) = divrem_u128_by_u64(x, 0, m);
+    // Third limb (value 0): divide the remainder, shifted, again.
+    let (q_lo, _) = divrem_u128_by_u64(r, 0, m);
+    ((q_hi as u128) << 64) | q_lo as u128
 }
 
 // ---------------------------------------------------------------------------------
@@ -669,7 +724,7 @@ pub(crate) fn b_sum(n: u64, terms: u64) -> u128 {
         let m = 2 * k + 1;
         let mont = Montgomery::new(m);
         let pow10 = powmod_mont(&mont, 10, n);
-        let x = mulmod(4 % m, pow10, m);
+        let x = mulmod_small(4 % m, pow10, m);
         signed(frac_fixed_point(x, m), k)
     });
     maybe_reduce!(iter, || 0u128, u128::wrapping_add)
@@ -1094,6 +1149,110 @@ mod tests {
             let base = rng.next() % m.max(1);
             let exp = rng.next() % 100;
             check_powmod_mont(m, base, exp);
+        }
+    }
+
+    /// [`divrem_u128_by_u64`] must agree with the portable `u128 / u128` and `u128 % u128`
+    /// computation it replaces, for every `(hi, lo, d)` satisfying the hardware `div`
+    /// instruction's precondition (`hi < d`, i.e. the quotient fits in 64 bits).
+    #[test]
+    fn divrem_u128_by_u64_matches_portable_division() {
+        let mut rng = Xorshift(0x7F_4A_7C_15_F3_5A_9B_79);
+        let check = |hi: u64, lo: u64, d: u64| {
+            let x = ((hi as u128) << 64) | lo as u128;
+            let expected = ((x / d as u128) as u64, (x % d as u128) as u64);
+            assert_eq!(
+                divrem_u128_by_u64(hi, lo, d),
+                expected,
+                "hi={hi} lo={lo} d={d}"
+            );
+        };
+        check(0, 0, 1);
+        check(0, u64::MAX, 1);
+        check(0, 0, u64::MAX);
+        check(u64::MAX - 1, u64::MAX, u64::MAX);
+        for _ in 0..10_000 {
+            let d = rng.next().max(1);
+            let hi = rng.next() % d; // satisfy hi < d
+            let lo = rng.next();
+            check(hi, lo, d);
+        }
+    }
+
+    /// The exact pre-hardware-`div` implementation, kept here only as [`frac_fixed_point`]'s
+    /// correctness oracle: it was already proven correct by every MPFR cross-check in
+    /// `tests/nthdigit.rs`/`tests/nthdigit2.rs` before this rewrite, so matching it bit for
+    /// bit is the right bar, not a fresh derivation.
+    fn frac_fixed_point_naive(x: u64, m: u64) -> u128 {
+        let m128 = m as u128;
+        let r = x as u128;
+        let cur = r << 64;
+        let q_hi = cur / m128;
+        let r = cur % m128;
+        let cur = r << 64;
+        let q_lo = cur / m128;
+        (q_hi << 64) | q_lo
+    }
+
+    #[test]
+    fn frac_fixed_point_matches_naive_reference() {
+        let mut rng = Xorshift(0x27_D4_EB_2F_16_57_5E_47);
+        for &m in &[1u64, 2, 3, 7, u64::MAX, (1u64 << 62) - 1] {
+            for x in 0..m.min(5) {
+                assert_eq!(
+                    frac_fixed_point(x, m),
+                    frac_fixed_point_naive(x, m),
+                    "x={x} m={m}"
+                );
+            }
+        }
+        for _ in 0..10_000 {
+            let m = rng.next().max(1);
+            let x = rng.next() % m;
+            assert_eq!(
+                frac_fixed_point(x, m),
+                frac_fixed_point_naive(x, m),
+                "x={x} m={m}"
+            );
+        }
+    }
+
+    /// [`mulmod_small`] must agree with [`mulmod`] for every `a` it's actually meant for.
+    #[test]
+    fn mulmod_small_matches_mulmod() {
+        let mut rng = Xorshift(0x9E_97_96_31_4F_4C_97_51);
+        for a in 0u64..=4 {
+            for &m in &[1u64, 3, 5, 7, (1u64 << 62) - 1] {
+                let b = m.saturating_sub(1);
+                assert_eq!(mulmod_small(a, b, m), mulmod(a, b, m), "a={a} b={b} m={m}");
+            }
+            for _ in 0..1_000 {
+                let m = (rng.next() % (1u64 << 62)).max(1);
+                let b = rng.next() % m;
+                assert_eq!(mulmod_small(a, b, m), mulmod(a, b, m), "a={a} b={b} m={m}");
+            }
+        }
+    }
+
+    /// [`two_pow_64_mod`] must agree with the direct `u128` computation it replaces, for any
+    /// `m >= 1` (not just odd `m` — this fact doesn't depend on Montgomery reduction at all).
+    #[test]
+    fn two_pow_64_mod_matches_u128_computation() {
+        let mut rng = Xorshift(0xC2_B2_AE_3D_27_D4_EB_4F);
+        for &m in &[1u64, 2, 3, 4, 5, 7, u64::MAX, (1u64 << 62) - 1] {
+            assert_eq!(
+                two_pow_64_mod(m),
+                ((1u128 << 64) % m as u128) as u64,
+                "m={m}"
+            );
+        }
+        for _ in 0..5_000 {
+            let m = rng.next().max(1);
+            assert_eq!(
+                two_pow_64_mod(m),
+                ((1u128 << 64) % m as u128) as u64,
+                "m={m}"
+            );
         }
     }
 
