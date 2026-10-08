@@ -88,6 +88,7 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
+    pihunt::mem_profile::install_gmp_hook();
     let result = match Cli::parse().cmd {
         Cmd::Run { batch, shard } => run(batch, shard),
         Cmd::Plan { batch, shard } => show_plan(batch, shard),
@@ -298,6 +299,11 @@ fn digit_cmd(pos: u64, count: usize, method: Method, mem: Option<u64>) -> Result
     let start = std::time::Instant::now();
     let s = digits_with(method, pos - 1, count, mem);
     let ms = start.elapsed().as_millis();
+    #[cfg(feature = "mem-profile")]
+    eprintln!(
+        "[mem-profile] whole run: tracked peak {:.2} MiB (now GMP-inclusive, see install_gmp_hook)",
+        pihunt::mem_profile::peak_bytes() as f64 / (1024.0 * 1024.0)
+    );
     match peak_rss_kb() {
         Some(kb) => eprintln!("digit {pos} (+{count}, {method:?}): {ms} ms, peak RSS {kb} KiB"),
         None => eprintln!("digit {pos} (+{count}, {method:?}): {ms} ms"),
