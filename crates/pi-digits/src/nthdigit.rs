@@ -269,6 +269,25 @@ impl Montgomery {
     }
 }
 
+/// `base^exp mod m`, via Montgomery reduction instead of [`powmod`]'s `u128` division —
+/// same algorithm (binary exponentiation), same result, but every multiply along the way is
+/// a [`Montgomery::mul`] instead of a `mulmod`. Plain in, plain out (encodes `base` going in,
+/// decodes the result coming out), so it's a drop-in replacement anywhere the modulus is
+/// already known to be odd and used for more than a handful of multiplies — which `powmod`
+/// always is, one binary-exponentiation bit at a time.
+fn powmod_mont(mont: &Montgomery, base: u64, mut exp: u64) -> u64 {
+    let mut result = mont.one();
+    let mut base_mont = mont.encode(base % mont.m);
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = mont.mul(result, base_mont);
+        }
+        base_mont = mont.mul(base_mont, base_mont);
+        exp >>= 1;
+    }
+    mont.decode(result)
+}
+
 /// Modular inverse of `a` mod `m` (which must be coprime to `m`), via the extended
 /// Euclidean algorithm on `i128` (large enough to hold every intermediate for `u64` inputs
 /// without overflow).
@@ -648,7 +667,8 @@ pub(crate) fn signed(term: u128, k: u64) -> u128 {
 pub(crate) fn b_sum(n: u64, terms: u64) -> u128 {
     let iter = maybe_into_par_iter!(0..terms).map(|k| {
         let m = 2 * k + 1;
-        let pow10 = powmod(10, n, m);
+        let mont = Montgomery::new(m);
+        let pow10 = powmod_mont(&mont, 10, n);
         let x = mulmod(4 % m, pow10, m);
         signed(frac_fixed_point(x, m), k)
     });
@@ -1050,6 +1070,45 @@ mod tests {
             let b = rng.next() % m;
             check_montgomery(m, a, b);
         }
+    }
+
+    /// [`powmod_mont`] must agree with plain [`powmod`] for random odd `m` and random
+    /// `base, exp` — the correctness oracle for routing [`b_sum`] through Montgomery
+    /// reduction instead of `mulmod`'s `u128` division (profiling: `b_sum` was ~70% of
+    /// Theorem 2's total time, almost all of it `__umodti3`/`__udivti3`, the software
+    /// 128-bit division routines `u128 % u128` compiles to — see `docs/nthdigit.md`).
+    #[test]
+    fn powmod_mont_matches_powmod() {
+        let mut rng = Xorshift(0x51_0E_52_7F_AD_E6_82_D1);
+        for &m in &[1u64, 3, 5, 7, 9, 2 * 3 * 5 * 7 + 1, (1u64 << 61) - 1] {
+            check_powmod_mont(m, 0, 0);
+            check_powmod_mont(m, 10 % m.max(1), 0);
+            check_powmod_mont(m, 10 % m.max(1), 1);
+            check_powmod_mont(m, 10 % m.max(1), 23);
+        }
+        for _ in 0..5_000 {
+            let mut m = (rng.next() % (1u64 << 61)) | 1;
+            if m == 0 {
+                m = 1;
+            }
+            let base = rng.next() % m.max(1);
+            let exp = rng.next() % 100;
+            check_powmod_mont(m, base, exp);
+        }
+    }
+
+    fn check_powmod_mont(m: u64, base: u64, exp: u64) {
+        if m == 1 {
+            assert_eq!(
+                powmod_mont(&Montgomery::new(m), base, exp),
+                0,
+                "m=1 is always 0"
+            );
+            return;
+        }
+        let expected = powmod(base, exp, m);
+        let got = powmod_mont(&Montgomery::new(m), base, exp);
+        assert_eq!(got, expected, "m={m} base={base} exp={exp}");
     }
 
     fn check_montgomery(m: u64, a: u64, b: u64) {

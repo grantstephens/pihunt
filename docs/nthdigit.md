@@ -101,6 +101,40 @@ plain `mulmod` (extra `redc` calls cost more than the division they were meant t
 Caching each `R_i`'s Montgomery form and only refreshing it when `R_i` itself changes (rare —
 most `j` share no factor with most `p_i`) turned it into a real, measured win instead.
 
+**Update (2026-10-08): the *other* hot loop never got this treatment, and by Theorem 2's era it
+was the dominant one.** `b_sum` — the `B` part of the `B - C` split, shared verbatim by Theorem 1
+and Theorem 2 — computed `10^n mod m` by plain binary exponentiation through `powmod`/`mulmod`'s
+`u128 % u128` the whole time. That was never the bottleneck *for Theorem 1*, where `C`
+(`s_k_mod_with_primes`, Montgomery'd above) dominates at ~25:1. Theorem 2 replaces `C` with the
+much faster chunked remainder tree (`src/nthdigit2.rs`), which left `b_sum`'s un-Montgomery'd
+`powmod` as the new dominant cost without anyone having profiled `--method thm2` specifically to
+notice — `perf record` on a 1-thread `n=3e6` run found **49.6% of all CPU time in `__umodti3`**
+(the compiler's software 128-bit division routine — x86-64 has no hardware instruction for a full
+128÷128 divide) plus another chunk in `b_sum`'s own closure calling it, roughly 70% combined.
+
+Fix: `powmod_mont` (`src/nthdigit.rs`), the same binary-exponentiation algorithm as `powmod` but
+through `Montgomery::mul`/`redc` instead of `mulmod`, tested against `powmod` for agreement
+across random `(m, base, exp)` including `m=1`. `b_sum` builds a fresh `Montgomery` per `k`
+(`m = 2k+1` changes every iteration, so there's no running state to reuse the way
+`s_k_mod_with_primes` does) and calls `powmod_mont` in place of `powmod`; the one remaining
+`mulmod` per `k` (`4 % m` times the result) was left as plain `mulmod` — one division per `k`
+instead of up to ~46 (one per `mulmod` call inside the old `powmod`'s binary exponentiation) is
+already most of the win, and Montgomery-ing a single multiply wasn't worth the extra
+encode/decode round trip. Verified unchanged output (`digit 3000000`'s digits identical,
+`cargo test`'s full suite plus the slow MPFR cross-checks at 10⁵/10⁶/2×10⁵ all pass) before
+trusting the speedup.
+
+Measured at `n = 3×10⁶`, same machine, back-to-back before/after on the same build: 1 thread
+**103.3 s → 81.7-86.1 s** (≈ 20-26%), default 6 threads **44.1 s → 18.0 s** (≈ 2.4×, bigger than
+the 1-thread gain since the division work this removed didn't parallelise any better than the
+multiplication work replacing it, so cutting its *total* cost matters more once there are more
+threads contending for the same memory bandwidth). Re-profiling confirmed `__umodti3` is gone
+from the hot-symbol list entirely; the new top cost is `Montgomery::redc` itself (real
+multiplication work, not division), plus GMP's own `__gmpn_mul_basecase_zen` (the ART's bignum
+work, unchanged, just a bigger *share* of a smaller total). Benefits Theorem 1 too, since
+`b_sum` is shared code — not separately re-measured here, but the mechanism doesn't care which
+theorem called it.
+
 ## Profiling: where the time actually goes
 
 Instrumented with a throwaway `nthdigit-profile` Cargo feature (`cargo build --features
