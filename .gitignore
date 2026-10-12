@@ -2,3 +2,8 @@
 **/*.rs.bk
 .claude/worktrees/
 /site/dist/
+# research/ subdirectories (e.g. research/bellard/rust) are standalone crates outside the root
+# workspace -- /target above (anchored to the repo root) doesn't reach their own target/ dirs.
+research/**/target/
+# Wrangler's local cache (account id, project metadata) -- tool-local state, not repo content.
+.wrangler/

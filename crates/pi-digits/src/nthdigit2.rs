@@ -151,6 +151,23 @@
 //! m_k)) + chunks)` where `chunks = O(N log n / mem_bits)` (tiny: a few thousand `(u64,u64)` pairs
 //! even at `n = 1e7`) — genuinely independent of `N` now that cofactor resolution is batched
 //! rather than collected whole.
+//!
+//! **Update (2026-10-08): the GMP blind spot was real but turned out not to matter.** This
+//! section used to list `rug::Integer`/`Float` bignums — the ART product tree, `Q`, etc. — as
+//! untracked, since this workspace links system GMP and GMP's own `malloc` never touches Rust's
+//! `#[global_allocator]`. [`crate::mem_profile::install_gmp_hook`] fixes that (routes GMP through
+//! the same counter via `mp_set_memory_functions`; proven correct by an isolated test,
+//! `tests/mem_profile.rs`, since the counter is process-global and noisy under the unit-test
+//! binary's concurrency). Re-measuring `digit` end to end with the hook installed: tracked peak
+//! was **bit-for-bit identical** with and without it, at n=100 (trivial), 3e6, and 1e7 alike.
+//! GMP's own heap contribution here is genuinely small, not a hidden dominant term — the
+//! hypothesis that motivated building the hook was wrong, and now there's a measurement proving
+//! it instead of a guess. The gap between tracked peak and OS-measured RSS (`peak_rss_kb` in
+//! `src/main.rs`) is fixed process overhead: a trivial n=100 run already costs ~4.5 MiB of RSS
+//! (binary + glibc/GMP/MPFR shared-library loading + main thread stack) against ~0.04 MiB
+//! tracked, and that floor doesn't move with `n`. What's left of the gap at larger `n` (a few
+//! MiB) is most likely rayon worker-thread stacks, not algorithmic memory — plausible but not
+//! confirmed further, since it isn't a lever `nthdigit2`'s own code can pull.
 
 use crate::bignum::Big;
 use crate::nthdigit::{

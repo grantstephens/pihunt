@@ -97,22 +97,37 @@ impl State {
     /// The termination checks, in order. `None` means keep going.
     pub fn check(&self, iterations: u64) -> Option<Outcome> {
         let bound = norm_bound(&self.h);
-        if let Some(i) = tiny_y(&self.y, &self.eps) {
+        let (i, min_y) = min_abs_y(&self.y);
+        let closeness = Float::with_val(self.prec, &min_y / &self.eps).to_f64();
+        if min_y < self.eps {
             let coeffs = (0..self.n).map(|k| self.b[k][i].clone()).collect();
             return Some(Outcome::Relation {
                 coeffs,
                 iterations,
                 bound,
+                closeness,
             });
         }
         if bound > self.exclude_at {
-            return Some(Outcome::Excluded { bound, iterations });
+            return Some(Outcome::Excluded {
+                bound,
+                iterations,
+                closeness,
+            });
         }
         if max_abs(&self.a) > self.a_limit {
-            return Some(Outcome::PrecisionExhausted { bound, iterations });
+            return Some(Outcome::PrecisionExhausted {
+                bound,
+                iterations,
+                closeness,
+            });
         }
         if iterations >= self.max_iterations {
-            return Some(Outcome::IterationCap { bound, iterations });
+            return Some(Outcome::IterationCap {
+                bound,
+                iterations,
+                closeness,
+            });
         }
         None
     }
@@ -204,13 +219,13 @@ fn norm_bound(h: &[Vec<Float>]) -> f64 {
     if m == 0.0 { f64::INFINITY } else { 1.0 / m }
 }
 
-fn tiny_y(y: &[Float], eps: &Float) -> Option<usize> {
-    let (i, v) = y
-        .iter()
+/// Index and magnitude of `y`'s smallest-magnitude entry.
+fn min_abs_y(y: &[Float]) -> (usize, Float) {
+    y.iter()
         .enumerate()
         .map(|(i, v)| (i, Float::with_val(v.prec(), v.abs_ref())))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())?;
-    (v < *eps).then_some(i)
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .expect("n >= 2")
 }
 
 fn max_abs(a: &[Vec<Integer>]) -> Integer {

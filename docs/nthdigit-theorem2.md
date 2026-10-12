@@ -320,6 +320,41 @@ because Python punishes Theorem 1's word-level loop, which is why §6.1 uses a C
   run-to-run noise at every size tested. See `src/nthdigit2.rs`'s module docs (the "Memory"
   section) for the full writeup, including why a naive first cut at the batch size briefly looked
   like a ~9% slowdown at n=1e7 until controlling for machine variance showed it wasn't real.
+  **Update 4 (2026-10-08): checked whether GMP itself was the next hidden term — it isn't.**
+  This workspace links *system* GMP, and `rug::Integer`/`Float`'s own `malloc` calls never
+  touched the counting allocator Updates 2-3 used, so the ART bignum working set (the product
+  tree, `Q`, etc.) was invisible to every peak-RSS-vs-tracked-peak comparison above. Built
+  `install_gmp_hook` (`src/mem_profile.rs`, routes GMP through the same counter via
+  `mp_set_memory_functions`, proved correct by an isolated test since the counter is
+  process-global) to close that gap and re-measured. Result: tracked peak was **bit-for-bit
+  identical** with and without the hook, at n=100, 3e6, and 1e7 alike — GMP's own heap use here
+  isn't a hidden dominant term, disproving the hypothesis that motivated building it. The
+  remaining gap to OS-measured RSS is fixed process overhead: a trivial n=100 run already costs
+  ~4.5 MiB of RSS (binary + glibc/GMP/MPFR shared-library loading + main thread stack) against
+  ~0.04 MiB tracked, a floor that doesn't move with `n`; what's left at larger `n` is most likely
+  rayon worker-thread stacks, plausible but not confirmed further since it isn't something this
+  algorithm's own code controls. See `src/nthdigit2.rs`'s module docs for the full writeup. Net:
+  the tracked peak (6.36 MiB at n=3e6, 12.52 MiB at n=1e7) is now a genuinely complete account of
+  this algorithm's memory, Rust- and GMP-allocated alike.
+
+  **Update 5 (2026-10-08, same day): tried shrinking the product tree anyway — decisively
+  negative.** This section's own §5.1 offered "shrink the chunk budget by log m" as a way to
+  bring the tree from `O(m log m)` down to `O(m)`: smaller chunks, more of them, same total
+  item count and work, so no time-complexity change *in theory*. Implemented it (`chunk_bounds`
+  and `stream_needs_and_chunks` used `mem_bits / mem_bits.ilog2()` as the per-chunk bit budget
+  instead of `mem_bits`) and measured at n=3e6: chunk count went 551 -> 7625 (as predicted, a
+  `log2(mem_bits)`-ish factor more chunks), tracked peak memory **did not improve** (6.36 MiB ->
+  6.48 MiB, slightly worse), and wall time went **44 s -> 461 s, a ~10x slowdown**. Two things
+  the theory didn't account for: the product tree apparently wasn't the dominant tracked term to
+  begin with (consistent with Update 4 — if GMP's bignums aren't the hidden cost, the tree they
+  live in probably isn't either, so shrinking it had nothing real to save), and the *fixed*
+  per-chunk cost (re-factoring the window twice per `art_chunk_by_range`'s own doc, a `HashMap`
+  built and torn down, a rayon task dispatched) does not scale down with chunk size — multiply
+  that fixed cost by 14x more chunks and it dominates completely. Reverted cleanly (confirmed via
+  `git diff`); the existing `mem_bits`-direct chunking stays. Worth remembering alongside Update
+  3's near-miss: a complexity argument saying "same total work, just regrouped" is only true of
+  the *variable* part of the cost — it says nothing about fixed per-unit overhead, and that's
+  exactly what dominates once the units get small enough.
 * The p-adic tables are O(p) words, and p can reach √(2(M+1)N) *in principle*. In the Rust port,
   p-adic treatment only ever applies to primes `<= sqrt(max m_k)` (a prime above that bound
   divides `m_k` to at most the first power, by construction — see above), so its p-adic tables'

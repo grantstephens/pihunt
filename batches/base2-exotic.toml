@@ -1,0 +1,50 @@
+# Bellard's 1997 "exotic formula" (base 2^20, period 40, degree 1 -- see src/known.rs and
+# docs/findings-bbp-hunt.md) and the original 1996 BBP formula (base 16 = 2^4, period 8, degree
+# 1 -- already rediscovered as a sanity check, see batches/known.toml) both live in base-2^k
+# territory, not base 10. docs/findings-bbp-hunt.md's "closed" finding is specifically about base
+# 10: the Borwein-Borwein-Galway theorem that rules out degree-1 BBP formulas there is silent on
+# (doesn't exclude) powers of 2, which is exactly why those two formulas exist. No search here has
+# ever set `bases` to anything but [10, 100, 1000] -- this is a different, untouched part of the
+# space, not a rerun of a closed one.
+#
+# `Shape` only represents positive bases (Bellard's own formula needed its alternating
+# (-1)^k/2^(10k) weight folded into a positive base 2^20 before PSLQ could see it -- see the
+# rediscovery note in docs/findings-bbp-hunt.md), so this search is restricted to that same
+# positive-base territory on purpose: exactly where both known hits live.
+#
+# First real use of `method = "lhs"` (src/plan.rs's Latin hypercube sampler) -- implemented
+# alongside sobol when grid/sobol/lhs job planning was added, never actually exercised by any
+# batch until now.
+name   = "base2-exotic"
+output = "results/base2-exotic.jsonl"
+
+[defaults]
+# Bellard's own rediscovery (batches/bellard.toml) needed C=1e7 at base 2^20/period 40 ("primitive
+# coefficients reach ~5e5 once the odd-k half is scaled by 2^10"); kept uniform across this whole
+# batch for safety even though the smaller bases below don't need it.
+coeff_bound = 10000000
+finder      = "multilevel"
+escalate    = 2
+max_columns = 100
+
+[search]
+mode = "sample"
+# 17 powers of 2 (skipping 2^4=16 and 2^6=64, already rediscovered in batches/known.toml, and
+# 2^20, already in batches/bellard.toml) plus 7 small non-power-of-2 bases included at the time
+# for curiosity. CORRECTION (see docs/findings-bbp-hunt.md): those 7 bases are not actually open --
+# Borwein-Borwein-Galway (2004) prove no degree-1 Machin-type BBP formula for pi exists in any base
+# that isn't a power of 2 (base 3 is one of their own examples), the same closure base 10 has. The
+# 0 hits for them below confirm theory, not a new result. batches/base2-focused.toml drops them.
+bases = [
+  32, 128, 256, 512, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
+  524288, 2097152, 4194304, 8388608, 16777216,
+  3, 5, 6, 7, 9, 11, 13,
+]
+periods = { from = 2, to = 48 }
+degrees = [[1, 1], [1, 2]]
+extras  = [[], ["log2"], ["pi2", "log2", "log3", "log5", "catalan", "zeta3"]]
+
+[sample]
+method = "lhs"
+count  = 150
+seed   = 1997

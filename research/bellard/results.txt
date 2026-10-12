@@ -1,0 +1,122 @@
+# Bellard pi.c (gcc -O3 -march=native), measured 2026-10-03, single thread, shared cloud VM.
+# Digits agree with the CLI-position table in docs/nthdigit.md (n=10^4: 856672279...).
+n        bellard_s
+1000     0.18
+10000    14.03
+20000    54.17
+50000    323.66
+
+# Rust port (rust/, cargo build --release), same machine, 4 cores. Digits identical to pi.c
+# (checked n=1,100,1000,10^4 and 5*10^4).
+n        naive_1t_s   fast_1t_s   fast_4t_s
+10000    10.16        2.52        0.81
+20000    41.28        9.15        3.10
+
+# pi1.c (Bellard's Feb 1997 Gosper-formula variant, same output as pi.c), gcc -O3, 1 thread.
+n        pi1_s
+10000    3.25
+20000    12.36
+50000    74.38
+
+# pi_bin.c (binary/hex digits via Bellard's 1997 pi_bin formula; our implementation, O(d log d)).
+# Verified: d=0 -> 243F6A88, d=999999 -> 26C65E52 (known hex digits).
+d (hex pos-1)   seconds
+1000000         1.06
+10000000        12.22
+100000000       135.69
+
+# Update (2026-10-07): re-measured on the actual pihunt benchmark machine (AMD Ryzen 7 5700G,
+# 6 cores, gcc -O3 -march=native) -- the cloud VM above isn't the machine every other benchmark
+# number in docs/nthdigit.md uses, so it wasn't directly comparable to Theorem 1/Theorem 2. This
+# machine runs consistently ~3.6-3.7x faster across the board (pi.c, pi1.c, and pi_bin.c alike),
+# which happens to roughly match the 4-core/1-core-ish gap you'd expect from a shared cloud VM's
+# throttling, not evidence of anything algorithmic. See docs/nthdigit.md's "Comparison against
+# Bellard's existing n-th-digit implementations" for the full writeup these numbers feed.
+n        pi.c_s   pi1.c_s
+10000    7.87     2.10
+20000    30.15    8.03
+
+d (hex pos-1)   seconds
+1000000         0.29
+10000000        3.30
+
+# Update (2026-10-07, same session): Rust port of pi1.c added (rust/, --formula pi1 --variant
+# naive; --variant fast not implemented for this formula yet, exits with an error rather than
+# silently running naive). Same machine as the row above, 1 thread. Digits cross-checked against
+# the actual pi1.c binary (not just known reference digits) at n=1,100,1000,10^4,2*10^4 -- all
+# match. See docs/nthdigit.md and research/bellard/README.md for the full writeup, including a
+# first (wrong) measurement that looked like Rust running slower than C -- it was a stale binary,
+# not a real result; see README.md's note.
+n        pi1_rust_naive_1t_s
+10000    0.91
+20000    3.63
+
+# Update 2 (2026-10-07, same session): pi1's `fast` variant added (Montgomery + batched
+# inversion + threading, same technique as pi.c's, adapted for Gosper's four running terms;
+# a==2 falls back to naive, one prime out of thousands, negligible cost). Digits cross-checked
+# against pi1.c at n=1,100,1000,10^4,2*10^4 -- all match. Also re-ran pi.c's naive/fast here in
+# the same session for a complete, consistent 2x2 (pi/pi1 x naive/fast) table -- these supersede
+# the 4-core row from the original Rust-port block above (that was 4 threads, cloud VM; this is
+# 6 threads, this machine). See README.md for the full ratios writeup.
+n        formula   naive_1t_s   fast_1t_s   fast_6t_s
+10000    pi        3.07         1.44        0.316
+10000    pi1       0.91         0.29        0.051
+20000    pi        12.69        5.43        0.961
+20000    pi1       3.63         1.06        0.202
+
+# Update 3 (2026-10-07, same session): Mont::mul's conditional subtract made branchless (see
+# reduce_once in rust/src/main.rs) -- a real win, not just noise (several repeats each). The
+# same trick tried on the batch accumulator in flush! was a small, reproducible *regression*
+# (~1.5-2%) and was reverted; see README.md for that negative result. fast_1t_s/fast_6t_s below
+# supersede the block above (naive_1t_s unchanged -- naive doesn't use Mont::mul at all).
+n        formula   fast_1t_s   fast_6t_s
+10000    pi        1.29        0.24
+10000    pi1       0.23        0.06
+20000    pi        4.77        0.848
+20000    pi1       0.85        0.152
+
+# Update 4 (2026-10-07, same session): tried the SIMD-across-primes redesign flagged as an open
+# direction above (--formula pi1-simd4, AVX2, 4 odd primes in lockstep -- see
+# README.md's "Update" for the full account, including the verification done before trusting any
+# of these numbers). Negative result: consistently ~7-8% SLOWER than pi1 fast, not faster, and
+# two follow-up optimisation attempts (avoiding a redundant pack/unpack round-trip per k;
+# switching pack() to a cheaper AVX2 zero-extend instruction) didn't close the gap. Kept as a
+# documented negative result, not recommended for use.
+n        pi1_simd4_1t_s   pi1_simd4_6t_s
+20000    0.91             0.163
+50000    5.17             -
+
+# Update 5 (2026-10-07, same session): root-caused Update 4's gap with perf (installed partway
+# through, with the user's go-ahead, specifically to stop guessing -- see README.md). numv/denv
+# were spilled to the stack and reloaded every k instead of staying in YMM registers; one reload
+# alone was ~25% of the hot function's own samples. Two targeted fixes tried (isolating the
+# update into its own #[inline(never)] call; shrinking the per-lane batch buffers from 512 to 64
+# to cut stack-frame pressure) -- neither closed the gap (the first measured slower, ~0.95-1.03s;
+# the second was within noise of the original, ~0.89-0.93s, and re-profiling showed the exact
+# same spill instruction, same ~28% share, unmoved). Confirmed root cause, no fix found this
+# round; both experiments reverted, pi1-simd4 unchanged from Update 4's numbers above.
+
+# Update 6 (2026-10-07, same session): static disassembly (objdump, no profiler needed) ruled out
+# register scarcity directly -- only 5 of 16 YMM registers in use in frac4_avx2, both montmul4
+# calls confirmed inlined (no call instruction for them). Then tried the user's suggested
+# assembly route: two asm! register-pin hints (one-sided at the write end, then symmetric at
+# both read and write ends) forcing numv/denv into specific unused registers at precise program
+# points, without touching the real arithmetic. Both: identical spill, identical instruction,
+# timing unchanged (~0.93s, if anything marginally worse from the extra asm overhead). Four
+# independent targeted interventions now produce the exact same result -- strong evidence this is
+# an LLVM loop/PHI-node-level storage decision, not fixable by hints at the use sites. A real fix
+# would need the whole update rewritten as one opaque hand-written asm block (not attempted --
+# materially larger, correctness-critical undertaking; see README.md). pi1-simd4 unchanged.
+
+# Update 7 (2026-10-07, same session): tried a third, structurally different angle --
+# vectorising flush_lane's batched-inverse extraction instead of the main loop (no loop-carried
+# dependency between items once ib[i] is known, single shared modulus -- neither property the
+# main loop's spill needed, so a genuinely different bet). Split the single reverse pass into
+# computing+storing ib[] (unchanged, sequential) then a vectorised extraction pass over groups
+# of 4 independent items via montmul4. Measured ~29% SLOWER (0.91s -> 1.15s at n=2e4), not an
+# improvement. Isolated why: a scalar-but-still-two-pass version (same split, no montmul4) matched
+# the original single-pass baseline exactly (~0.91s) -- the split itself is free. The entire
+# regression is the vectorisation, most likely the pa[be[i]] gather (four data-dependent indices,
+# not a contiguous load like the main loop's term arrays) costing more to assemble/unpack than
+# the three scalar multiplies it replaces. Reverted cleanly (confirmed via git diff --stat
+# matching the pre-experiment size exactly). pi1-simd4 unchanged from Update 4's numbers.

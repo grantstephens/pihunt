@@ -27,6 +27,7 @@ fn rec(base: u32, period: u32, extras: &[&str], outcome: Kind, c: u64, digits: u
         dropped: vec![],
         outcome,
         bound: Some("1.0e4".into()),
+        closeness: Some(2.0),
         iterations: 1,
         relation: None,
         verify: None,

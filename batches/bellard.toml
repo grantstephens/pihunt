@@ -1,0 +1,14 @@
+name   = "bellard"
+output = "results/bellard.jsonl"
+
+[defaults]
+# Bellard's 1997 formula, folded to a positive base: (-1)^k / 2^(10k) -> base 2^20, period 40.
+# Primitive coefficients reach ~5e5 once the odd-k half is scaled by 2^10, so C needs headroom.
+coeff_bound = 10000000
+
+[search]
+mode    = "grid"
+bases   = [1048576]
+periods = { from = 40, to = 40 }
+degrees = [[1, 1]]
+extras  = [[]]

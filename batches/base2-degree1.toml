@@ -1,0 +1,34 @@
+# Theory-guided follow-up to batches/base2-clean.toml. That batch (and base2-focused/exotic
+# before it) split budget six ways across degrees=[[1,1],[1,2]] x extras=[[],[log2],[pi2,...]].
+# Under the same weight-conservation conjecture already backing docs/findings-bbp-hunt.md's
+# base-10 closure (`## Why nothing was found`, item 2 -- the argument never depended on the base
+# being 10), any relation mixing pi (weight 1) with weight-2/3 periods (pi2, zeta3, catalan, the
+# logs) is conjectured to need those higher-weight parts to cancel on their own. So 5 of those 6
+# (degree, extras) combinations are conjecturally reducible to the pure degree-1 case -- useful as
+# consistency checks (and that's exactly what they kept turning up: log identities, nothing new),
+# but not places a genuinely independent pi relation can hide. Only degrees=[1,1], extras=[] is
+# actually open. This batch spends the entire budget there instead of splitting it six ways.
+#
+# Dropping degree/extras to single values shrinks the space enough to grid-search exhaustively --
+# 12 bases x periods 2..64 is ~750 jobs, no sampling needed, so this also covers (rather than
+# hopes to land near) the one structural prior we have: BBP (base 2^4, period 8) and Bellard
+# (base 2^20, period 40) both have period = 2 x the base's exponent of 2. Two data points, not
+# proof, but it's the only lead anyone's got, and a full grid over periods 2-64 covers it for
+# every base here (2*log2(base) ranges from 10 to 46 across these 12 bases).
+name   = "base2-degree1"
+output = "results/base2-degree1.jsonl"
+
+[defaults]
+coeff_bound = 10000000
+finder      = "multilevel"
+escalate    = 2
+max_columns = 100
+
+[search]
+mode = "grid"
+bases = [
+  32, 128, 512, 2048, 8192, 16384, 32768, 131072, 524288, 2097152, 4194304, 8388608,
+]
+periods = { from = 2, to = 64 }
+degrees = [[1, 1]]
+extras  = [[]]

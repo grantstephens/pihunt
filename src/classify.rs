@@ -60,8 +60,16 @@ pub fn classify(
                 });
                 v.kind = if passed { Kind::Hit } else { Kind::Spurious };
                 if passed {
-                    let known = known::is_known(shape, &cols.names, &rel);
-                    v.tag = Some(if known { "known" } else { "NEW" }.into());
+                    v.tag = Some(
+                        if known::is_known(shape, &cols.names, &rel) {
+                            "known"
+                        } else if known::is_derived(shape, &cols.names, &rel) {
+                            "derived"
+                        } else {
+                            "NEW"
+                        }
+                        .into(),
+                    );
                 }
             }
             v.relation = Some(rel);

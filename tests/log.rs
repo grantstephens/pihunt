@@ -23,6 +23,7 @@ fn record(id: &str) -> Record {
         dropped: vec![],
         outcome: Kind::Excluded,
         bound: Some("1.000e4".into()),
+        closeness: Some(2.5),
         iterations: 3,
         relation: None,
         verify: None,

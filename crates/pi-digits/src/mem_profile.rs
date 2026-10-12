@@ -13,7 +13,12 @@
 //! `lucas_small` vs `cofactor` Vecs) additionally compute those structures' own heap footprint
 //! directly (`.capacity() * size_of::<T>()`) and log that alongside a `checkpoint`. The global
 //! peak still catches anything neither of us thought to size explicitly (rayon per-thread
-//! working sets, `rug::Integer` bignums, glibc arena overhead, etc).
+//! working sets, glibc arena overhead, etc) — **except `rug::Integer`/`Float` bignums under the
+//! `gmp` backend**, which were invisible until [`install_gmp_hook`]: this workspace links
+//! *system* GMP (see the root `Cargo.toml`'s comment on `gmp-mpfr-sys`), so GMP's own `malloc`
+//! calls never go through Rust's `#[global_allocator]`. [`install_gmp_hook`] routes them through
+//! the same counter via `mp_set_memory_functions`. Measured gap this closed at n=1e7: process RSS
+//! 19.9 MiB vs. 12.5 MiB tracked before the hook — see `nthdigit2.rs`'s "Memory" section.
 
 #[cfg(feature = "mem-profile")]
 mod imp {
@@ -88,10 +93,74 @@ mod imp {
     pub fn live_bytes() -> usize {
         CURRENT.load(Ordering::Relaxed).max(0) as usize
     }
+
+    #[cfg(feature = "gmp")]
+    mod gmp_hook {
+        use super::bump;
+        use gmp_mpfr_sys::gmp;
+        use std::alloc::{GlobalAlloc, Layout, System, handle_alloc_error};
+        use std::ffi::c_void;
+        use std::sync::Once;
+
+        // GMP doesn't report the alignment it needs; 16 matches what `malloc` guarantees on
+        // every platform this project targets, which is what GMP's own default allocator uses.
+        const ALIGN: usize = 16;
+
+        fn layout(size: usize) -> Layout {
+            Layout::from_size_align(size, ALIGN).expect("GMP allocation size overflows isize")
+        }
+
+        extern "C" fn alloc(size: usize) -> *mut c_void {
+            let l = layout(size);
+            let ptr = unsafe { System.alloc(l) };
+            if ptr.is_null() {
+                handle_alloc_error(l);
+            }
+            bump(size as i64);
+            ptr as *mut c_void
+        }
+
+        unsafe extern "C" fn realloc(
+            ptr: *mut c_void,
+            old_size: usize,
+            new_size: usize,
+        ) -> *mut c_void {
+            let new_ptr = unsafe { System.realloc(ptr as *mut u8, layout(old_size), new_size) };
+            if new_ptr.is_null() {
+                handle_alloc_error(layout(new_size));
+            }
+            bump(new_size as i64 - old_size as i64);
+            new_ptr as *mut c_void
+        }
+
+        unsafe extern "C" fn free(ptr: *mut c_void, size: usize) {
+            unsafe { System.dealloc(ptr as *mut u8, layout(size)) };
+            bump(-(size as i64));
+        }
+
+        static INSTALLED: Once = Once::new();
+
+        /// Routes GMP's own allocations through this module's counter — see the module docs'
+        /// note on why `rug::Integer`/`Float` were invisible without this. Idempotent; call
+        /// before the computation you want to profile starts (allocations made before the
+        /// call aren't retroactively counted, but anything live at call time keeps whatever
+        /// size GMP last told its *previous* allocator, which is fine for a peak-since-start
+        /// measurement taken from near the start of a run).
+        pub fn install() {
+            INSTALLED.call_once(|| unsafe {
+                gmp::set_memory_functions(Some(alloc), Some(realloc), Some(free));
+            });
+        }
+    }
+
+    #[cfg(feature = "gmp")]
+    pub use gmp_hook::install as install_gmp_hook;
+    #[cfg(not(feature = "gmp"))]
+    pub fn install_gmp_hook() {}
 }
 
 #[cfg(feature = "mem-profile")]
-pub use imp::{checkpoint, live_bytes, peak_bytes, reset_peak};
+pub use imp::{checkpoint, install_gmp_hook, live_bytes, peak_bytes, reset_peak};
 
 #[cfg(not(feature = "mem-profile"))]
 pub fn checkpoint(_label: &str) {}
@@ -105,3 +174,5 @@ pub fn peak_bytes() -> usize {
 pub fn live_bytes() -> usize {
     0
 }
+#[cfg(not(feature = "mem-profile"))]
+pub fn install_gmp_hook() {}
